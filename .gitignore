@@ -1,0 +1,13 @@
+/build/
+/.idea/
+/.vscode/
+*.user
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.exe
+snapshots/
+sessions/
+presets/

@@ -1,0 +1,19 @@
+[
+  {
+    "name": "robot_1",
+    "host": "192.168.1.10",
+    "user": "ubuntu",
+    "port": 22,
+    "domain_id": "0",
+    "ros_setup": "/opt/ros/humble/setup.bash"
+  },
+  {
+    "name": "robot_2",
+    "host": "192.168.1.11",
+    "user": "ubuntu",
+    "port": 22,
+    "domain_id": "1",
+    "ros_setup": "/opt/ros/humble/setup.bash"
+  }
+]
+

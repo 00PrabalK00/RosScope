@@ -1,0 +1,29 @@
+{
+  "preset_name": "lab_default",
+  "selected_domain": "0",
+  "watchdog_enabled": false,
+  "expected_profile": {
+    "network_alert_mbps": 250.0,
+    "expected_nodes": [
+      "/controller_server",
+      "/planner_server",
+      "/bt_navigator",
+      "/amcl"
+    ],
+    "expected_topics": [
+      "/tf",
+      "/tf_static",
+      "/cmd_vel",
+      "/odom",
+      "/scan"
+    ],
+    "topic_expected_hz": {
+      "/tf": 30.0,
+      "/scan": 10.0,
+      "/imu": 50.0,
+      "/local_costmap/costmap": 5.0
+    }
+  },
+  "remote_targets": []
+}
+
