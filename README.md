@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="resources/logo" alt="RosScope Logo" width="320" />
+  <img src="resources/logo" alt="RosScope Logo" width="480" />
 </p>
 
 <p align="center">
