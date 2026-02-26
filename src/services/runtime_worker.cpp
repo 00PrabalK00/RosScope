@@ -1,17 +1,40 @@
 #include "rrcc/runtime_worker.hpp"
 
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonValue>
 #include <QFile>
+#include <QCryptographicHash>
 #include <QMap>
 #include <QStringList>
+#include <QThread>
 
 #include "rrcc/command_runner.hpp"
+#include "rrcc/telemetry.hpp"
 
 namespace rrcc {
+
+namespace {
+
+QString compactHash(const QJsonValue& value) {
+    const QByteArray payload = QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact);
+    return QString::fromLatin1(QCryptographicHash::hash(payload, QCryptographicHash::Sha1).toHex());
+}
+
+QString compactHashArray(const QJsonArray& value) {
+    const QByteArray payload = QJsonDocument(value).toJson(QJsonDocument::Compact);
+    return QString::fromLatin1(QCryptographicHash::hash(payload, QCryptographicHash::Sha1).toHex());
+}
+
+QString compactHashText(const QString& value) {
+    return QString::fromLatin1(
+        QCryptographicHash::hash(value.toUtf8(), QCryptographicHash::Sha1).toHex());
+}
+
+}  // namespace
 
 RuntimeWorker::RuntimeWorker(QObject* parent)
     : QObject(parent),
@@ -26,17 +49,35 @@ RuntimeWorker::RuntimeWorker(QObject* parent)
     }
 }
 
+void RuntimeWorker::pruneParameterCache() {
+    while (parameterCacheOrder_.size() > maxParameterCacheEntries_) {
+        const QString oldest = parameterCacheOrder_.takeFirst();
+        parameterCache_.remove(oldest);
+    }
+}
+
 QJsonArray RuntimeWorker::applyProcessFilter(
     const QJsonArray& processes,
     bool rosOnly,
-    const QString& query) const {
+    const QString& query,
+    const QString& scope) const {
     const QString queryLower = query.trimmed().toLower();
+    const QString scopeLower = scope.trimmed().toLower();
     QJsonArray filtered;
 
     for (const QJsonValue& value : processes) {
         const QJsonObject proc = value.toObject();
         if (rosOnly && !proc.value("is_ros").toBool()) {
             continue;
+        }
+        if (scopeLower == "ros only" && !proc.value("is_ros").toBool()) {
+            continue;
+        }
+        if (scopeLower.startsWith("domain ")) {
+            const QString domain = scopeLower.mid(QString("domain ").size()).trimmed();
+            if (proc.value("ros_domain_id").toString("0") != domain) {
+                continue;
+            }
         }
 
         if (!queryLower.isEmpty()) {
@@ -90,10 +131,20 @@ QJsonObject RuntimeWorker::buildResponse(
     snapshot.insert("fleet", fleet);
     snapshot.insert("session", session);
     snapshot.insert("watchdog", watchdog);
+    snapshot.insert("sync_version", static_cast<double>(syncVersion_));
+    snapshot.insert("process_offset", request_.value("process_offset").toInt(0));
+    snapshot.insert("process_limit", request_.value("process_limit").toInt(400));
     return snapshot;
 }
 
 void RuntimeWorker::poll(const QJsonObject& request) {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (lastPollEpochMs_ > 0 && (now - lastPollEpochMs_) < minPollIntervalMs_) {
+        const int sleepMs = minPollIntervalMs_ - static_cast<int>(now - lastPollEpochMs_);
+        if (sleepMs > 0) {
+            QThread::msleep(static_cast<unsigned long>(sleepMs));
+        }
+    }
     request_ = request;
     if (busy_) {
         pending_ = true;
@@ -103,19 +154,47 @@ void RuntimeWorker::poll(const QJsonObject& request) {
 }
 
 void RuntimeWorker::pollNow() {
+    QElapsedTimer pollTimer;
+    pollTimer.start();
     busy_ = true;
     pollCounter_++;
+    lastPollEpochMs_ = QDateTime::currentMSecsSinceEpoch();
+    Telemetry::instance().recordRequest();
+    Telemetry::instance().incrementCounter("sync.poll_count");
 
     const bool rosOnly = request_.value("ros_only").toBool(false);
     const QString processQuery = request_.value("process_query").toString();
+    const QString processScope = request_.value("process_scope").toString("ROS Only");
+    const qint64 sinceVersion = request_.value("since_version").toInteger(-1);
+    const int processOffset = qMax(0, request_.value("process_offset").toInt(0));
+    const int processLimit = qBound(100, request_.value("process_limit").toInt(400), 2000);
     QString selectedDomain = request_.value("selected_domain").toString("0");
     const int activeTab = request_.value("active_tab").toInt(0);
     const bool engineerMode = request_.value("engineer_mode").toBool(true);
 
-    // Fast path: refresh process/system baseline every poll cycle.
-    lastAllProcesses_ = processManager_.listProcesses(false, "");
-    lastVisibleProcesses_ = applyProcessFilter(lastAllProcesses_, rosOnly, processQuery);
-    lastDomainSummaries_ = rosInspector_.listDomains(lastAllProcesses_);
+    const bool idleFastPath =
+        consecutiveNoChangePolls_ >= 3
+        && activeTab != 0
+        && activeTab != 1
+        && (pollCounter_ % 2 == 0)
+        && !lastAllProcesses_.isEmpty();
+
+    if (!idleFastPath) {
+        const bool deepRosInspection = processScope.toLower() != "all processes";
+        lastAllProcesses_ = processManager_.listProcesses(false, "", deepRosInspection);
+        lastDomainSummaries_ = rosInspector_.listDomains(lastAllProcesses_);
+    } else {
+        Telemetry::instance().incrementCounter("sync.idle_fastpath_hits");
+    }
+
+    const QJsonArray filteredProcesses =
+        applyProcessFilter(lastAllProcesses_, rosOnly, processQuery, processScope);
+    QJsonArray pagedProcesses;
+    const int end = qMin(filteredProcesses.size(), processOffset + processLimit);
+    for (int i = processOffset; i < end; ++i) {
+        pagedProcesses.append(filteredProcesses.at(i));
+    }
+    lastVisibleProcesses_ = pagedProcesses;
 
     QStringList knownDomains;
     for (const QJsonValue& value : lastDomainSummaries_) {
@@ -169,13 +248,13 @@ void RuntimeWorker::pollNow() {
     // Heavy ROS graph probes are decimated unless the relevant tab is active.
     const bool needGraph =
         (engineerMode && (activeTab == 2 || activeTab == 6 || activeTab == 7 || activeTab == 8 || pollCounter_ % 4 == 0))
-        || (!engineerMode && pollCounter_ % 10 == 0);
+        || (!engineerMode && pollCounter_ % (idleBackoffMs_ >= 4000 ? 18 : 10) == 0);
     const bool needTf =
         (engineerMode && (activeTab == 3 || activeTab == 6 || activeTab == 7 || activeTab == 8 || pollCounter_ % 5 == 0))
-        || (!engineerMode && pollCounter_ % 15 == 0);
+        || (!engineerMode && pollCounter_ % (idleBackoffMs_ >= 4000 ? 24 : 15) == 0);
     const bool needLogs =
         (engineerMode && ((activeTab == 5) || pollCounter_ % 4 == 0))
-        || (!engineerMode && pollCounter_ % 8 == 0);
+        || (!engineerMode && pollCounter_ % (idleBackoffMs_ >= 4000 ? 16 : 8) == 0);
 
     if (needGraph || lastGraph_.isEmpty() || lastGraph_.value("domain_id").toString() != selectedDomain) {
         lastGraph_ = rosInspector_.inspectGraph(selectedDomain, lastAllProcesses_);
@@ -213,6 +292,9 @@ void RuntimeWorker::pollNow() {
     if (activeTab == 10 || pollCounter_ % 8 == 0) {
         lastFleet_ = remoteMonitor_.collectFleetStatus(4500);
     }
+    if (pollCounter_ % 6 == 0) {
+        remoteMonitor_.resumeQueuedActions(2, 4500);
+    }
 
     lastWatchdog_ = {
         {"enabled", watchdogEnabled_},
@@ -236,12 +318,68 @@ void RuntimeWorker::pollNow() {
         lastFleet_,
         sessionRecorder_.status(),
         lastWatchdog_);
+    response.insert("process_total_filtered", filteredProcesses.size());
+    response.insert("process_offset", processOffset);
+    response.insert("process_limit", processLimit);
+
+    const QJsonObject sectionHashes = {
+        {"processes_visible", compactHashArray(lastVisibleProcesses_)},
+        {"domain_summaries", compactHashArray(lastDomainSummaries_)},
+        {"domains", compactHashArray(lastDomainDetails_)},
+        {"graph", compactHash(lastGraph_)},
+        {"tf_nav2", compactHash(lastTfNav2_)},
+        {"system", compactHash(lastSystem_)},
+        {"health", compactHash(lastHealth_)},
+        {"advanced", compactHash(lastAdvanced_)},
+        {"fleet", compactHash(lastFleet_)},
+        {"session", compactHash(sessionRecorder_.status())},
+        {"watchdog", compactHash(lastWatchdog_)},
+        {"logs", compactHashText(lastLogs_)},
+    };
+    const QString fingerprint = compactHash(sectionHashes);
+    const bool changed = (fingerprint != lastSyncFingerprint_);
+    if (changed) {
+        syncVersion_++;
+        lastSyncFingerprint_ = fingerprint;
+        consecutiveNoChangePolls_ = 0;
+        idleBackoffMs_ = 1000;
+    } else {
+        consecutiveNoChangePolls_++;
+        idleBackoffMs_ = qMin(maxBackoffMs_, idleBackoffMs_ * 2);
+    }
+    response.insert("sync_version", static_cast<double>(syncVersion_));
+    response.insert("etag", fingerprint);
+    response.insert("changed", changed);
+    response.insert("changed_sections", sectionHashes);
+    response.insert("idle_backoff_ms", idleBackoffMs_);
+    response.insert("offline_queue_size", lastFleet_.value("offline_queue_size"));
+
+    if (!changed && sinceVersion == syncVersion_) {
+        response.remove("processes_all");
+        response.remove("processes_visible");
+        response.remove("domain_summaries");
+        response.remove("domains");
+        response.remove("graph");
+        response.remove("tf_nav2");
+        response.remove("system");
+        response.remove("logs");
+        response.remove("health");
+        response.remove("advanced");
+        response.remove("fleet");
+        response.remove("session");
+        response.remove("watchdog");
+        response.remove("node_parameters");
+        response.insert("heartbeat_only", true);
+    }
 
     penultimateSnapshot_ = previousSnapshot_;
     previousSnapshot_ = response;
     sessionRecorder_.recordSample(response);
 
     emit snapshotReady(response);
+    Telemetry::instance().recordDurationMs("sync.duration_ms", pollTimer.elapsed());
+    Telemetry::instance().setGauge("sync.idle_backoff_ms", idleBackoffMs_);
+    Telemetry::instance().setGauge("sync.consecutive_no_change", consecutiveNoChangePolls_);
 
     busy_ = false;
     if (pending_) {
@@ -251,6 +389,9 @@ void RuntimeWorker::pollNow() {
 }
 
 void RuntimeWorker::runAction(const QString& action, const QJsonObject& payload) {
+    QElapsedTimer actionTimer;
+    actionTimer.start();
+    Telemetry::instance().incrementCounter("actions.count");
     QJsonObject result;
     result.insert("action", action);
     result.insert("success", false);
@@ -313,9 +454,12 @@ void RuntimeWorker::runAction(const QString& action, const QJsonObject& payload)
             const QJsonObject params = rosInspector_.fetchNodeParameters(graphDomain, nodeName);
             if (params.value("success").toBool(false)) {
                 snapshotParams.insert(nodeName, params.value("parameters").toString());
+                parameterCacheOrder_.append(nodeName);
+                parameterCacheOrder_.removeDuplicates();
             }
         }
         parameterCache_ = snapshotParams;
+        pruneParameterCache();
 
         const QJsonObject snapshot = snapshotManager_.buildSnapshot(
             lastAllProcesses_,
@@ -371,6 +515,11 @@ void RuntimeWorker::runAction(const QString& action, const QJsonObject& payload)
         result.insert("action", action);
     } else if (action == "session_export") {
         result = sessionRecorder_.exportSession(payload.value("format").toString("json"));
+        result.insert("action", action);
+    } else if (action == "export_telemetry") {
+        const QString path = payload.value("path").toString(
+            QDir(QDir::currentPath()).filePath("logs/telemetry.json"));
+        result = Telemetry::instance().exportToFile(path);
         result.insert("action", action);
     } else if (action == "save_preset") {
         result = saveRuntimePreset(payload.value("name").toString("default"));
@@ -440,6 +589,10 @@ void RuntimeWorker::runAction(const QString& action, const QJsonObject& payload)
     }
 
     emit actionFinished(result);
+    Telemetry::instance().recordDurationMs("actions.duration_ms", actionTimer.elapsed());
+    if (!result.value("success").toBool(false)) {
+        Telemetry::instance().incrementCounter("actions.failures");
+    }
 
     // Controls mutate runtime state; schedule fast refresh with existing request.
     if (action != "snapshot_json" && action != "snapshot_yaml"
@@ -453,6 +606,9 @@ void RuntimeWorker::fetchNodeParameters(const QString& domainId, const QString& 
     QJsonObject result = rosInspector_.fetchNodeParameters(domainId, nodeName);
     if (result.value("success").toBool(false)) {
         parameterCache_.insert(nodeName, result.value("parameters").toString());
+        parameterCacheOrder_.append(nodeName);
+        parameterCacheOrder_.removeDuplicates();
+        pruneParameterCache();
     }
     emit nodeParametersReady(result);
 }

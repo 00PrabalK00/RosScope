@@ -22,8 +22,7 @@ private:
     QString startedUtc_;
     QString endedUtc_;
     QJsonArray samples_;
-    int maxSamples_ = 5000;
+    int maxSamples_ = 1500;
 };
 
 }  // namespace rrcc
-

@@ -13,7 +13,7 @@ class ProcessManager {
 public:
     ProcessManager() = default;
 
-    QJsonArray listProcesses(bool rosOnly, const QString& query);
+    QJsonArray listProcesses(bool rosOnly, const QString& query, bool deepRosInspection = true);
     QJsonArray filterRosProcesses(const QJsonArray& processes) const;
     QJsonArray workspaceOrigins(const QJsonArray& processes) const;
 

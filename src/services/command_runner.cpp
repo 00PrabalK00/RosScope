@@ -1,7 +1,10 @@
 #include "rrcc/command_runner.hpp"
 
+#include <QElapsedTimer>
 #include <QProcess>
 #include <QProcessEnvironment>
+
+#include "rrcc/telemetry.hpp"
 
 namespace rrcc {
 
@@ -11,6 +14,8 @@ CommandResult CommandRunner::run(
     int timeoutMs,
     const QMap<QString, QString>& extraEnv) {
     QProcess process;
+    QElapsedTimer elapsed;
+    elapsed.start();
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     for (auto it = extraEnv.constBegin(); it != extraEnv.constEnd(); ++it) {
         env.insert(it.key(), it.value());
@@ -23,6 +28,8 @@ CommandResult CommandRunner::run(
     if (!process.waitForStarted(timeoutMs)) {
         result.timedOut = true;
         result.stderrText = "Failed to start process.";
+        Telemetry::instance().incrementCounter("commands.start_failures");
+        Telemetry::instance().recordDurationMs("commands.duration_ms", elapsed.elapsed());
         return result;
     }
 
@@ -31,12 +38,19 @@ CommandResult CommandRunner::run(
         process.waitForFinished(500);
         result.timedOut = true;
         result.stderrText = "Command timed out.";
+        Telemetry::instance().incrementCounter("commands.timeouts");
+        Telemetry::instance().recordDurationMs("commands.duration_ms", elapsed.elapsed());
         return result;
     }
 
     result.exitCode = process.exitCode();
     result.stdoutText = QString::fromUtf8(process.readAllStandardOutput());
     result.stderrText = QString::fromUtf8(process.readAllStandardError());
+    Telemetry::instance().incrementCounter("commands.count");
+    if (result.exitCode != 0) {
+        Telemetry::instance().incrementCounter("commands.non_zero_exit");
+    }
+    Telemetry::instance().recordDurationMs("commands.duration_ms", elapsed.elapsed());
     return result;
 }
 
@@ -48,4 +62,3 @@ CommandResult CommandRunner::runShell(
 }
 
 }  // namespace rrcc
-

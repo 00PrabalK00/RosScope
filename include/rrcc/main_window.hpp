@@ -1,6 +1,5 @@
 #pragma once
 
-#include <QCheckBox>
 #include <QComboBox>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -15,6 +14,7 @@
 #include <QTimer>
 #include <QTreeWidget>
 #include <QString>
+#include <QStringList>
 
 #include "rrcc/runtime_worker.hpp"
 
@@ -39,8 +39,14 @@ private:
     void applyMode();
 
     void queueRefresh();
+    void scheduleRefresh(int delayMs = 0, bool force = false);
     QJsonObject buildPollRequest() const;
     QString selectedDomainId() const;
+    static qint64 processMemoryRssKb();
+    void updateProcessPaginationLabel();
+    void pruneNodeParameterCache();
+    void updateProcessScopeOptions();
+    void applyProcessTableMode();
 
     void renderFromSnapshot(const QJsonObject& snapshot);
     void renderProcesses();
@@ -71,8 +77,17 @@ private:
     QJsonObject cachedSession_;
     QJsonObject cachedWatchdog_;
     QJsonObject cachedNodeParameters_;
+    qint64 cachedSyncVersion_ = -1;
+    QString cachedEtag_;
+    int processOffset_ = 0;
+    int processLimit_ = 400;
+    int processTotalFiltered_ = 0;
+    QStringList nodeParameterOrder_;
+    int maxNodeParameterCache_ = 500;
     QString cachedLogs_;
     QString currentDomain_;
+    QString lastProcessRenderHash_;
+    QString lastDomainRenderHash_;
 
     QWidget* central_ = nullptr;
     QComboBox* modeCombo_ = nullptr;
@@ -87,6 +102,7 @@ private:
     QPushButton* sessionStartButton_ = nullptr;
     QPushButton* sessionStopButton_ = nullptr;
     QPushButton* sessionExportButton_ = nullptr;
+    QPushButton* telemetryExportButton_ = nullptr;
     QPushButton* watchdogToggleButton_ = nullptr;
     QPushButton* fleetRefreshButton_ = nullptr;
     QPushButton* fleetLoadTargetsButton_ = nullptr;
@@ -94,10 +110,22 @@ private:
     QPushButton* remoteKillButton_ = nullptr;
     QTabWidget* tabs_ = nullptr;
     QTimer* refreshTimer_ = nullptr;
+    QTimer* refreshDebounceTimer_ = nullptr;
+    QTimer* eventLoopLagTimer_ = nullptr;
+    QTimer* memoryWatchTimer_ = nullptr;
+    bool refreshInFlight_ = false;
+    int refreshIntervalMs_ = 1500;
+    int minRefreshIntervalMs_ = 500;
+    int maxRefreshIntervalMs_ = 12000;
+    qint64 lastLagSampleEpochMs_ = 0;
 
     QLineEdit* processSearch_ = nullptr;
-    QCheckBox* rosOnlyCheck_ = nullptr;
+    QComboBox* processScopeCombo_ = nullptr;
+    QComboBox* processViewModeCombo_ = nullptr;
     QTableWidget* processTable_ = nullptr;
+    QPushButton* processPrevButton_ = nullptr;
+    QPushButton* processNextButton_ = nullptr;
+    QLabel* processPageLabel_ = nullptr;
     QPushButton* terminateButton_ = nullptr;
     QPushButton* forceKillButton_ = nullptr;
     QPushButton* killTreeButton_ = nullptr;

@@ -26,7 +26,9 @@ void SessionRecorder::recordSample(const QJsonObject& snapshot) {
     if (!active_) {
         return;
     }
-    samples_.append(snapshot);
+    QJsonObject compact = snapshot;
+    compact.remove("logs");
+    samples_.append(compact);
     while (samples_.size() > maxSamples_) {
         samples_.removeAt(0);
     }

@@ -11,3 +11,6 @@
 snapshots/
 sessions/
 presets/
+
+# local docs
+/docs/

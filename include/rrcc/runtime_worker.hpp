@@ -4,6 +4,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
+#include <QStringList>
 
 #include "rrcc/control_actions.hpp"
 #include "rrcc/diagnostics_engine.hpp"
@@ -40,7 +41,8 @@ private:
     QJsonArray applyProcessFilter(
         const QJsonArray& processes,
         bool rosOnly,
-        const QString& query) const;
+        const QString& query,
+        const QString& scope) const;
     QJsonObject buildResponse(
         const QString& selectedDomain,
         const QJsonArray& allProcesses,
@@ -59,6 +61,7 @@ private:
     void applyWatchdog(const QString& selectedDomain);
     QJsonObject saveRuntimePreset(const QString& name) const;
     QJsonObject loadRuntimePreset(const QString& name);
+    void pruneParameterCache();
 
     ProcessManager processManager_;
     RosInspector rosInspector_;
@@ -75,6 +78,15 @@ private:
     bool busy_ = false;
     bool pending_ = false;
     int pollCounter_ = 0;
+    qint64 lastPollEpochMs_ = 0;
+    int minPollIntervalMs_ = 350;
+    int idleBackoffMs_ = 1000;
+    int maxBackoffMs_ = 12000;
+    int consecutiveNoChangePolls_ = 0;
+    qint64 syncVersion_ = 0;
+    QString lastSyncFingerprint_;
+    int maxParameterCacheEntries_ = 500;
+    QStringList parameterCacheOrder_;
 
     QJsonArray lastAllProcesses_;
     QJsonArray lastVisibleProcesses_;

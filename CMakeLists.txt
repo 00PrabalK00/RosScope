@@ -10,6 +10,8 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network)
 
 add_executable(roscoppe
+    include/rrcc/main_window.hpp
+    include/rrcc/runtime_worker.hpp
     src/main.cpp
     src/ui/main_window.cpp
     src/services/command_runner.cpp
@@ -24,6 +26,7 @@ add_executable(roscoppe
     src/services/health_monitor.cpp
     src/services/control_actions.cpp
     src/services/snapshot_manager.cpp
+    src/services/telemetry.cpp
 )
 
 target_include_directories(roscoppe PRIVATE include)

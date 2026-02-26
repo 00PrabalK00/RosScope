@@ -1,6 +1,7 @@
 #include "rrcc/process_manager.hpp"
 
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
@@ -14,6 +15,8 @@
 #ifdef __linux__
 #include <unistd.h>
 #endif
+
+#include "rrcc/telemetry.hpp"
 
 namespace {
 
@@ -204,7 +207,23 @@ bool ProcessManager::isRosProcess(
         }
     }
 
-    const QString maps = readFile(pidPath + "/maps").toLower();
+    // Guard expensive /proc/<pid>/maps scanning; this path can be very large
+    // and cause memory pressure on machines with many heavy processes.
+    if (!haystack.contains("ros")
+        && !haystack.contains("rcl")
+        && !haystack.contains("dds")
+        && !haystack.contains("fast")
+        && !haystack.contains("cyclone")) {
+        return false;
+    }
+
+    QFile mapsFile(pidPath + "/maps");
+    if (!mapsFile.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    const QByteArray mapsChunk = mapsFile.read(256 * 1024);  // bounded read
+    mapsFile.close();
+    const QString maps = QString::fromUtf8(mapsChunk).toLower();
     if (maps.contains("librclcpp")
         || maps.contains("librclpy")
         || maps.contains("librmw")
@@ -312,12 +331,14 @@ void ProcessManager::collectChildrenRecursive(qint64 pid, QSet<qint64>& outSet) 
     }
 }
 
-QJsonArray ProcessManager::listProcesses(bool rosOnly, const QString& query) {
+QJsonArray ProcessManager::listProcesses(bool rosOnly, const QString& query, bool deepRosInspection) {
 #ifndef __linux__
     Q_UNUSED(rosOnly);
     Q_UNUSED(query);
     return {};
 #else
+    QElapsedTimer timer;
+    timer.start();
     const qulonglong currentTotalJiffies = totalJiffies();
     const qulonglong memTotal = memoryTotalKb();
     const double uptimeSecs = systemUptimeSeconds();
@@ -385,10 +406,23 @@ QJsonArray ProcessManager::listProcesses(bool rosOnly, const QString& query) {
 
         const QString cmdline = readCmdline(pidPath);
         const QString exePath = readExePath(pidPath);
-        const QMap<QString, QString> env = readEnviron(pidPath);
+        const QString quickHaystack = (exePath + " " + cmdline).toLower();
+        const bool quickRosHint =
+            quickHaystack.contains("ros")
+            || quickHaystack.contains("rcl")
+            || quickHaystack.contains("dds")
+            || quickHaystack.contains("--ros-args")
+            || quickHaystack.contains("__node:=")
+            || quickHaystack.contains("__ns:=");
 
-        const QString domainId = env.value("ROS_DOMAIN_ID", "0");
-        const bool ros = isRosProcess(pidPath, exePath, cmdline, env);
+        QMap<QString, QString> env;
+        QString domainId = "0";
+        bool ros = false;
+        if (deepRosInspection || rosOnly || quickRosHint) {
+            env = readEnviron(pidPath);
+            domainId = env.value("ROS_DOMAIN_ID", "0");
+            ros = isRosProcess(pidPath, exePath, cmdline, env);
+        }
 
         if (rosOnly && !ros) {
             continue;
@@ -444,6 +478,9 @@ QJsonArray ProcessManager::listProcesses(bool rosOnly, const QString& query) {
     for (const QJsonObject& row : rows) {
         result.append(row);
     }
+    Telemetry::instance().incrementCounter("process.list_queries");
+    Telemetry::instance().setGauge("process.last_result_size", static_cast<double>(result.size()));
+    Telemetry::instance().recordDurationMs("process.query_ms", timer.elapsed());
     return result;
 #endif
 }
