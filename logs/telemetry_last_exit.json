@@ -1,0 +1,59 @@
+{
+    "counters": {
+        "commands.count": 82,
+        "process.list_queries": 14,
+        "sync.poll_count": 14
+    },
+    "durations": {
+        "commands.duration_ms": {
+            "avg_ms": 78.5609756097561,
+            "count": 82,
+            "max_ms": 272,
+            "total_ms": 6442
+        },
+        "process.query_ms": {
+            "avg_ms": 69.28571428571429,
+            "count": 14,
+            "max_ms": 94,
+            "total_ms": 970
+        },
+        "sync.duration_ms": {
+            "avg_ms": 535.3571428571429,
+            "count": 14,
+            "max_ms": 1162,
+            "total_ms": 7495
+        },
+        "ui.render.domain_list_ms": {
+            "avg_ms": 0,
+            "count": 14,
+            "max_ms": 0,
+            "total_ms": 0
+        },
+        "ui.render.process_list_ms": {
+            "avg_ms": 3.9285714285714284,
+            "count": 14,
+            "max_ms": 29,
+            "total_ms": 55
+        },
+        "ui.render.snapshot_ms": {
+            "avg_ms": 5.571428571428571,
+            "count": 14,
+            "max_ms": 30,
+            "total_ms": 78
+        }
+    },
+    "events": [
+    ],
+    "gauges": {
+        "memory.rss_kb": 118156,
+        "process.budget_per_tick": 428,
+        "process.cache.heavy_size": 56,
+        "process.last_result_size": 431,
+        "queue.offline_remote_actions": 0,
+        "sync.consecutive_no_change": 0,
+        "sync.idle_backoff_ms": 1000,
+        "ui.event_loop_lag_ms": 1
+    },
+    "requests_per_minute": 14,
+    "timestamp_utc": "2026-02-26T14:50:38Z"
+}

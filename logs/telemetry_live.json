@@ -1,64 +1,59 @@
 {
     "counters": {
-        "actions.count": 2,
-        "commands.count": 935,
-        "process.list_queries": 149,
-        "sync.poll_count": 149
+        "commands.count": 74,
+        "process.list_queries": 12,
+        "sync.poll_count": 12
     },
     "durations": {
-        "actions.duration_ms": {
-            "avg_ms": 0,
-            "count": 2,
-            "max_ms": 0,
-            "total_ms": 0
-        },
         "commands.duration_ms": {
-            "avg_ms": 92.67272727272727,
-            "count": 935,
-            "max_ms": 284,
-            "total_ms": 86649
+            "avg_ms": 86.08108108108108,
+            "count": 74,
+            "max_ms": 272,
+            "total_ms": 6370
         },
         "process.query_ms": {
-            "avg_ms": 84.91946308724832,
-            "count": 149,
-            "max_ms": 105,
-            "total_ms": 12653
+            "avg_ms": 66.41666666666667,
+            "count": 12,
+            "max_ms": 80,
+            "total_ms": 797
         },
         "sync.duration_ms": {
-            "avg_ms": 673.496644295302,
-            "count": 149,
-            "max_ms": 1169,
-            "total_ms": 100351
+            "avg_ms": 603.3333333333334,
+            "count": 12,
+            "max_ms": 1162,
+            "total_ms": 7240
         },
         "ui.render.domain_list_ms": {
             "avg_ms": 0,
-            "count": 149,
+            "count": 12,
             "max_ms": 0,
             "total_ms": 0
         },
         "ui.render.process_list_ms": {
             "avg_ms": 0,
-            "count": 149,
+            "count": 12,
             "max_ms": 0,
             "total_ms": 0
         },
         "ui.render.snapshot_ms": {
-            "avg_ms": 1.1946308724832215,
-            "count": 149,
-            "max_ms": 3,
-            "total_ms": 178
+            "avg_ms": 1.75,
+            "count": 12,
+            "max_ms": 5,
+            "total_ms": 21
         }
     },
     "events": [
     ],
     "gauges": {
-        "memory.rss_kb": 116844,
-        "process.last_result_size": 429,
+        "memory.rss_kb": 118156,
+        "process.budget_per_tick": 404,
+        "process.cache.heavy_size": 48,
+        "process.last_result_size": 431,
         "queue.offline_remote_actions": 0,
         "sync.consecutive_no_change": 0,
         "sync.idle_backoff_ms": 1000,
         "ui.event_loop_lag_ms": 0
     },
-    "requests_per_minute": 43,
-    "timestamp_utc": "2026-02-26T14:10:26Z"
+    "requests_per_minute": 12,
+    "timestamp_utc": "2026-02-26T14:50:34Z"
 }
