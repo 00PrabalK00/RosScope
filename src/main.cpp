@@ -6,7 +6,7 @@
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
-    app.setApplicationName("Roscoppe");
+    app.setApplicationName("RosScope");
     app.setOrganizationName("Prabal Khare");
     QObject::connect(&app, &QCoreApplication::aboutToQuit, []() {
         const QString path = QDir(QDir::currentPath()).filePath("logs/telemetry_last_exit.json");

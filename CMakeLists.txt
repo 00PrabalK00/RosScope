@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(roscoppe VERSION 0.1.0 LANGUAGES CXX)
+project(RosScope VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,7 +9,7 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network)
 
-add_executable(roscoppe
+add_executable(RosScope
     include/rrcc/main_window.hpp
     include/rrcc/runtime_worker.hpp
     src/main.cpp
@@ -29,12 +29,12 @@ add_executable(roscoppe
     src/services/telemetry.cpp
 )
 
-target_include_directories(roscoppe PRIVATE include)
+target_include_directories(RosScope PRIVATE include)
 
-target_link_libraries(roscoppe PRIVATE
+target_link_libraries(RosScope PRIVATE
     Qt6::Core
     Qt6::Widgets
     Qt6::Network
 )
 
-target_compile_options(roscoppe PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(RosScope PRIVATE -Wall -Wextra -Wpedantic)

@@ -8,7 +8,7 @@ echo "[perf] building"
 cmake --build build -j"$(nproc)" >/dev/null
 
 echo "[perf] launching app for smoke window (12s)"
-QT_QPA_PLATFORM=offscreen timeout 12s ./build/roscoppe >/tmp/roscoppe_perf.out 2>/tmp/roscoppe_perf.err || true
+QT_QPA_PLATFORM=offscreen timeout 12s ./build/RosScope >/tmp/RosScope_perf.out 2>/tmp/RosScope_perf.err || true
 
 TELEM_FILE="$ROOT_DIR/logs/telemetry_last_exit.json"
 if [[ ! -f "$TELEM_FILE" ]]; then

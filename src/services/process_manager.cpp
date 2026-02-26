@@ -331,157 +331,426 @@ void ProcessManager::collectChildrenRecursive(qint64 pid, QSet<qint64>& outSet) 
     }
 }
 
+QVector<qint64> ProcessManager::listProcPids() {
+    QVector<qint64> pids;
+    const QDir procDir("/proc");
+    const QStringList entries = procDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    pids.reserve(entries.size());
+    for (const QString& entry : entries) {
+        if (isNumeric(entry)) {
+            pids.push_back(entry.toLongLong());
+        }
+    }
+    return pids;
+}
+
+int ProcessManager::countOpenFds(const QString& pidPath) {
+    QDir fdDir(pidPath + "/fd");
+    return fdDir.entryList(QDir::NoDotAndDotDot | QDir::AllEntries).size();
+}
+
+QString ProcessManager::readCgroup(const QString& pidPath) {
+    return readFile(pidPath + "/cgroup").left(2048);
+}
+
+ProcessManager::ProcHeavy ProcessManager::fetchHeavyDetails(qint64 pid) const {
+    const QString pidPath = "/proc/" + QString::number(pid);
+    ProcHeavy heavy;
+    heavy.cmdline = readCmdline(pidPath);
+    heavy.env = readEnviron(pidPath);
+    heavy.cgroup = readCgroup(pidPath);
+    heavy.openFdCount = countOpenFds(pidPath);
+    heavy.threadCount = readStatus(pidPath).value("Threads").toString().toInt();
+    return heavy;
+}
+
+void ProcessManager::touchHeavyCache(qint64 pid, const ProcHeavy& heavy) {
+    heavyCache_.insert(pid, heavy);
+    heavyLru_.enqueue(pid);
+    evictHeavyCacheIfNeeded();
+}
+
+void ProcessManager::evictHeavyCacheIfNeeded() {
+    while (heavyCache_.size() > maxHeavyCacheEntries_) {
+        if (heavyLru_.isEmpty()) {
+            break;
+        }
+        const qint64 victim = heavyLru_.dequeue();
+        heavyCache_.remove(victim);
+    }
+}
+
+QVector<ProcessManager::HeapEntry> ProcessManager::topKCpu(int k) const {
+    auto cmp = [](const HeapEntry& a, const HeapEntry& b) { return a.metric > b.metric; };
+    std::vector<HeapEntry> heap;
+    heap.reserve(static_cast<size_t>(k) + 1);
+    for (auto it = pidIndex_.constBegin(); it != pidIndex_.constEnd(); ++it) {
+        const HeapEntry entry{it.value().cpuPercent, it.key()};
+        if (static_cast<int>(heap.size()) < k) {
+            heap.push_back(entry);
+            std::push_heap(heap.begin(), heap.end(), cmp);
+        } else if (entry.metric > heap.front().metric) {
+            std::pop_heap(heap.begin(), heap.end(), cmp);
+            heap.back() = entry;
+            std::push_heap(heap.begin(), heap.end(), cmp);
+        }
+    }
+    QVector<HeapEntry> out;
+    out.reserve(static_cast<qsizetype>(heap.size()));
+    for (const HeapEntry& e : heap) {
+        out.push_back(e);
+    }
+    return out;
+}
+
+QVector<ProcessManager::HeapEntry> ProcessManager::topKMemory(int k) const {
+    auto cmp = [](const HeapEntry& a, const HeapEntry& b) { return a.metric > b.metric; };
+    std::vector<HeapEntry> heap;
+    heap.reserve(static_cast<size_t>(k) + 1);
+    for (auto it = pidIndex_.constBegin(); it != pidIndex_.constEnd(); ++it) {
+        const HeapEntry entry{static_cast<double>(it.value().rssKb), it.key()};
+        if (static_cast<int>(heap.size()) < k) {
+            heap.push_back(entry);
+            std::push_heap(heap.begin(), heap.end(), cmp);
+        } else if (entry.metric > heap.front().metric) {
+            std::pop_heap(heap.begin(), heap.end(), cmp);
+            heap.back() = entry;
+            std::push_heap(heap.begin(), heap.end(), cmp);
+        }
+    }
+    QVector<HeapEntry> out;
+    out.reserve(static_cast<qsizetype>(heap.size()));
+    for (const HeapEntry& e : heap) {
+        out.push_back(e);
+    }
+    return out;
+}
+
+void ProcessManager::prefetchHeavyForTopK(
+    const QVector<HeapEntry>& topCpu,
+    const QVector<HeapEntry>& topMem,
+    int budget) {
+    QSet<qint64> candidate;
+    for (const HeapEntry& e : topCpu) {
+        candidate.insert(e.pid);
+    }
+    for (const HeapEntry& e : topMem) {
+        candidate.insert(e.pid);
+    }
+    int used = 0;
+    for (qint64 pid : candidate) {
+        if (used >= budget) {
+            break;
+        }
+        if (heavyCache_.contains(pid) || !pidIndex_.contains(pid)) {
+            continue;
+        }
+        touchHeavyCache(pid, fetchHeavyDetails(pid));
+        used++;
+    }
+}
+
+bool ProcessManager::collectLiteForPid(qint64 pid, bool deepRosInspection) {
+    const QString pidPath = "/proc/" + QString::number(pid);
+    const QString statLine = readFile(pidPath + "/stat");
+    if (statLine.isEmpty()) {
+        return false;
+    }
+    const int leftParen = statLine.indexOf('(');
+    const int rightParen = statLine.lastIndexOf(')');
+    if (leftParen < 0 || rightParen < 0 || rightParen <= leftParen) {
+        return false;
+    }
+
+    ProcLite rec = pidIndex_.value(pid);
+    rec.pid = pid;
+    rec.name = statLine.mid(leftParen + 1, rightParen - leftParen - 1).left(64);
+    const QStringList fields = statLine.mid(rightParen + 2).trimmed().split(' ', Qt::SkipEmptyParts);
+    if (fields.size() < 20) {
+        return false;
+    }
+    rec.state = fields[0];
+    rec.ppid = fields[1].toLongLong();
+    rec.threads = fields[17].toInt();
+    const qulonglong utime = fields[11].toULongLong();
+    const qulonglong stime = fields[12].toULongLong();
+    const qulonglong starttimeTicks = fields[19].toULongLong();
+    const qulonglong procJiffies = utime + stime;
+
+    const qulonglong deltaTotal = tickTotalJiffies_ - previousTotalJiffies_;
+    if (!firstCpuSample_ && deltaTotal > 0 && previousProcJiffies_.contains(pid)) {
+        const qulonglong deltaProc = procJiffies - previousProcJiffies_.value(pid);
+        rec.cpuPercent =
+            (100.0 * static_cast<double>(deltaProc) * static_cast<double>(cpuCores_))
+            / static_cast<double>(deltaTotal);
+        if (rec.cpuPercent < 0.0) {
+            rec.cpuPercent = 0.0;
+        }
+    } else {
+        rec.cpuPercent = 0.0;
+    }
+    previousProcJiffies_.insert(pid, procJiffies);
+
+    const QJsonObject status = readStatus(pidPath);
+    rec.rssKb = status.value("VmRSS").toString().split(' ', Qt::SkipEmptyParts).value(0).toULongLong();
+    rec.uptimeSeconds = tickUptimeSeconds_
+        - (static_cast<double>(starttimeTicks) / static_cast<double>(clockTicks_));
+
+    if (deepRosInspection) {
+        rec.commandLine = readCmdline(pidPath).left(320);
+        rec.executable = readExePath(pidPath);
+        const QMap<QString, QString> env = readEnviron(pidPath);
+        rec.domainId = env.value("ROS_DOMAIN_ID", "0");
+        rec.isRos = isRosProcess(pidPath, rec.executable, rec.commandLine, env);
+        rec.nodeName = detectNodeName(rec.commandLine);
+        rec.nameSpace = detectNamespace(rec.commandLine);
+        rec.workspaceOrigin = detectWorkspaceOrigin(rec.executable, env);
+        rec.packageName = detectPackage(rec.executable, rec.commandLine);
+        rec.launchSource = detectLaunchSource(rec.commandLine);
+    } else {
+        rec.commandLine.clear();
+        rec.executable.clear();
+        rec.domainId = "0";
+        rec.isRos = false;
+        rec.nodeName.clear();
+        rec.nameSpace = "/";
+        rec.workspaceOrigin.clear();
+        rec.packageName.clear();
+        rec.launchSource.clear();
+    }
+
+    rec.lastSeenTick = tickCounter_;
+    pidIndex_.insert(pid, rec);
+    return true;
+}
+
+void ProcessManager::refreshIncremental(bool deepRosInspection) {
+    tickCounter_++;
+    if (clockTicks_ <= 0) {
+        clockTicks_ = sysconf(_SC_CLK_TCK);
+    }
+    if (cpuCores_ <= 0) {
+        cpuCores_ = std::max(1, static_cast<int>(sysconf(_SC_NPROCESSORS_ONLN)));
+    }
+
+    const qulonglong currentTotalJiffies = totalJiffies();
+    memTotalKb_ = memoryTotalKb();
+    tickTotalJiffies_ = currentTotalJiffies;
+    tickUptimeSeconds_ = systemUptimeSeconds();
+
+    const QVector<qint64> currentPids = listProcPids();
+    for (qint64 pid : currentPids) {
+        const bool isNewPid = !pidIndex_.contains(pid);
+        ProcLite rec = pidIndex_.value(pid);
+        rec.pid = pid;
+        rec.lastSeenTick = tickCounter_;
+        pidIndex_.insert(pid, rec);
+        if (isNewPid) {
+            rrPids_.push_back(pid);
+        }
+    }
+
+    int updated = 0;
+    const int rrCount = rrPids_.size();
+    while (updated < updateBudgetPerTick_ && rrCount > 0) {
+        if (rrCursor_ >= rrPids_.size()) {
+            rrCursor_ = 0;
+        }
+        const qint64 pid = rrPids_.at(rrCursor_++);
+        if (!pidIndex_.contains(pid)) {
+            continue;
+        }
+        if (collectLiteForPid(pid, deepRosInspection)) {
+            updated++;
+        }
+    }
+
+    QVector<qint64> deadPids;
+    deadPids.reserve(pidIndex_.size() / 8);
+    for (auto it = pidIndex_.constBegin(); it != pidIndex_.constEnd(); ++it) {
+        if (it.value().lastSeenTick != tickCounter_) {
+            deadPids.push_back(it.key());
+        }
+    }
+    for (qint64 pid : deadPids) {
+        pidIndex_.remove(pid);
+        previousProcJiffies_.remove(pid);
+        heavyCache_.remove(pid);
+    }
+
+    rrPids_.erase(
+        std::remove_if(rrPids_.begin(), rrPids_.end(), [this](qint64 pid) { return !pidIndex_.contains(pid); }),
+        rrPids_.end());
+    if (rrCursor_ >= rrPids_.size()) {
+        rrCursor_ = 0;
+    }
+
+    const QVector<HeapEntry> topCpu = topKCpu(20);
+    const QVector<HeapEntry> topMem = topKMemory(20);
+    prefetchHeavyForTopK(topCpu, topMem, 4);
+
+    const qint64 deltaTotal = static_cast<qint64>(currentTotalJiffies - previousTotalJiffies_);
+    previousTotalJiffies_ = currentTotalJiffies;
+    firstCpuSample_ = false;
+
+    if (deltaTotal <= 0 || updated < (updateBudgetPerTick_ / 2)) {
+        updateBudgetPerTick_ = qMax(minBudget_, static_cast<int>(updateBudgetPerTick_ * 0.85));
+    } else {
+        updateBudgetPerTick_ = qMin(maxBudget_, updateBudgetPerTick_ + 12);
+    }
+}
+
+QJsonObject ProcessManager::toJsonRow(const ProcLite& rec, qulonglong memTotalKb) const {
+    QJsonObject row;
+    row.insert("pid", rec.pid);
+    row.insert("ppid", rec.ppid);
+    row.insert("name", rec.name);
+    row.insert("state", rec.state);
+    row.insert("executable", rec.executable);
+    row.insert("command_line", rec.commandLine);
+    row.insert("cpu_percent", rec.cpuPercent);
+    row.insert("memory_percent", memoryPercentKb(rec.rssKb, memTotalKb));
+    row.insert("threads", rec.threads);
+    row.insert("uptime_seconds", rec.uptimeSeconds);
+    row.insert("uptime_human", uptimeString(rec.uptimeSeconds));
+    row.insert("ros_domain_id", rec.domainId);
+    row.insert("is_ros", rec.isRos);
+    row.insert("node_name", rec.nodeName);
+    row.insert("namespace", rec.nameSpace);
+    row.insert("package", rec.packageName);
+    row.insert("workspace_origin", rec.workspaceOrigin);
+    row.insert("launch_source", rec.launchSource);
+    return row;
+}
+
 QJsonArray ProcessManager::listProcesses(bool rosOnly, const QString& query, bool deepRosInspection) {
 #ifndef __linux__
     Q_UNUSED(rosOnly);
     Q_UNUSED(query);
+    Q_UNUSED(deepRosInspection);
     return {};
 #else
     QElapsedTimer timer;
     timer.start();
-    const qulonglong currentTotalJiffies = totalJiffies();
-    const qulonglong memTotal = memoryTotalKb();
-    const double uptimeSecs = systemUptimeSeconds();
-    const long hz = sysconf(_SC_CLK_TCK);
-    const int cpuCores = std::max(1, static_cast<int>(sysconf(_SC_NPROCESSORS_ONLN)));
+
+    refreshIncremental(deepRosInspection);
     const QString queryLower = query.trimmed().toLower();
 
-    QHash<qint64, qulonglong> currentProcJiffies;
-    QList<QJsonObject> rows;
-
-    const QDir procDir("/proc");
-    const QStringList entries = procDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-    for (const QString& entry : entries) {
-        if (!isNumeric(entry)) {
+    QList<ProcLite> rows;
+    rows.reserve(pidIndex_.size());
+    for (auto it = pidIndex_.constBegin(); it != pidIndex_.constEnd(); ++it) {
+        const ProcLite& rec = it.value();
+        if (rosOnly && !rec.isRos) {
             continue;
         }
-
-        const qint64 pid = entry.toLongLong();
-        const QString pidPath = "/proc/" + entry;
-        const QString statLine = readFile(pidPath + "/stat");
-        if (statLine.isEmpty()) {
-            continue;
-        }
-
-        const int leftParen = statLine.indexOf('(');
-        const int rightParen = statLine.lastIndexOf(')');
-        if (leftParen < 0 || rightParen < 0 || rightParen <= leftParen) {
-            continue;
-        }
-
-        const QString procName = statLine.mid(leftParen + 1, rightParen - leftParen - 1);
-        const QString after = statLine.mid(rightParen + 2).trimmed();
-        const QStringList fields = after.split(' ', Qt::SkipEmptyParts);
-        if (fields.size() < 20) {
-            continue;
-        }
-
-        const qint64 ppid = fields[1].toLongLong();
-        const qulonglong utime = fields[11].toULongLong();
-        const qulonglong stime = fields[12].toULongLong();
-        const int threadCount = fields[17].toInt();
-        const qulonglong starttimeTicks = fields[19].toULongLong();
-        const qulonglong procJiffies = utime + stime;
-
-        currentProcJiffies.insert(pid, procJiffies);
-
-        double cpuPercent = 0.0;
-        const qulonglong deltaTotal = currentTotalJiffies - previousTotalJiffies_;
-        if (!firstCpuSample_ && deltaTotal > 0 && previousProcJiffies_.contains(pid)) {
-            const qulonglong deltaProc = procJiffies - previousProcJiffies_.value(pid);
-            cpuPercent = (100.0 * static_cast<double>(deltaProc) * static_cast<double>(cpuCores))
-                / static_cast<double>(deltaTotal);
-            if (cpuPercent < 0.0) {
-                cpuPercent = 0.0;
-            }
-        }
-
-        const QJsonObject status = readStatus(pidPath);
-        qulonglong vmRssKb = 0;
-        const QString vmRss = status.value("VmRSS").toString();
-        if (!vmRss.isEmpty()) {
-            vmRssKb = vmRss.split(' ', Qt::SkipEmptyParts).value(0).toULongLong();
-        }
-        const double memPercent = memoryPercentKb(vmRssKb, memTotal);
-
-        const QString cmdline = readCmdline(pidPath);
-        const QString exePath = readExePath(pidPath);
-        const QString quickHaystack = (exePath + " " + cmdline).toLower();
-        const bool quickRosHint =
-            quickHaystack.contains("ros")
-            || quickHaystack.contains("rcl")
-            || quickHaystack.contains("dds")
-            || quickHaystack.contains("--ros-args")
-            || quickHaystack.contains("__node:=")
-            || quickHaystack.contains("__ns:=");
-
-        QMap<QString, QString> env;
-        QString domainId = "0";
-        bool ros = false;
-        if (deepRosInspection || rosOnly || quickRosHint) {
-            env = readEnviron(pidPath);
-            domainId = env.value("ROS_DOMAIN_ID", "0");
-            ros = isRosProcess(pidPath, exePath, cmdline, env);
-        }
-
-        if (rosOnly && !ros) {
-            continue;
-        }
-
-        const QString nodeName = detectNodeName(cmdline);
-        const QString nodeNs = detectNamespace(cmdline);
-        const QString workspace = detectWorkspaceOrigin(exePath, env);
-        const QString packageName = detectPackage(exePath, cmdline);
-        const QString launchSource = detectLaunchSource(cmdline);
-
         if (!queryLower.isEmpty()) {
             const QString searchable =
-                QString::number(pid) + " " + procName + " " + exePath + " " + cmdline;
+                QString::number(rec.pid) + " " + rec.name + " " + rec.executable + " " + rec.commandLine;
             if (!searchable.toLower().contains(queryLower)) {
                 continue;
             }
         }
-
-        const double procUptime =
-            uptimeSecs - (static_cast<double>(starttimeTicks) / static_cast<double>(hz));
-
-        QJsonObject row;
-        row.insert("pid", static_cast<qint64>(pid));
-        row.insert("ppid", static_cast<qint64>(ppid));
-        row.insert("name", procName);
-        row.insert("executable", exePath);
-        row.insert("command_line", cmdline);
-        row.insert("cpu_percent", cpuPercent);
-        row.insert("memory_percent", memPercent);
-        row.insert("threads", threadCount);
-        row.insert("uptime_seconds", procUptime);
-        row.insert("uptime_human", uptimeString(procUptime));
-        row.insert("ros_domain_id", domainId);
-        row.insert("is_ros", ros);
-        row.insert("node_name", nodeName);
-        row.insert("namespace", nodeNs);
-        row.insert("package", packageName);
-        row.insert("workspace_origin", workspace);
-        row.insert("launch_source", launchSource);
-        rows.push_back(row);
+        rows.push_back(rec);
     }
 
-    std::sort(rows.begin(), rows.end(), [](const QJsonObject& a, const QJsonObject& b) {
-        return a.value("cpu_percent").toDouble() > b.value("cpu_percent").toDouble();
+    std::sort(rows.begin(), rows.end(), [](const ProcLite& a, const ProcLite& b) {
+        return a.cpuPercent > b.cpuPercent;
     });
 
-    previousProcJiffies_ = currentProcJiffies;
-    previousTotalJiffies_ = currentTotalJiffies;
-    firstCpuSample_ = false;
-
     QJsonArray result;
-    for (const QJsonObject& row : rows) {
-        result.append(row);
+    for (const ProcLite& rec : rows) {
+        result.append(toJsonRow(rec, memTotalKb_));
     }
+
     Telemetry::instance().incrementCounter("process.list_queries");
     Telemetry::instance().setGauge("process.last_result_size", static_cast<double>(result.size()));
+    Telemetry::instance().setGauge("process.budget_per_tick", static_cast<double>(updateBudgetPerTick_));
+    Telemetry::instance().setGauge("process.cache.heavy_size", static_cast<double>(heavyCache_.size()));
     Telemetry::instance().recordDurationMs("process.query_ms", timer.elapsed());
     return result;
+#endif
+}
+
+QJsonObject ProcessManager::listProcessesPaged(
+    bool rosOnly,
+    const QString& query,
+    bool deepRosInspection,
+    int offset,
+    int limit,
+    bool sortByCpu) {
+#ifndef __linux__
+    Q_UNUSED(rosOnly);
+    Q_UNUSED(query);
+    Q_UNUSED(deepRosInspection);
+    Q_UNUSED(offset);
+    Q_UNUSED(limit);
+    Q_UNUSED(sortByCpu);
+    return QJsonObject{{"rows", QJsonArray{}}, {"total", 0}};
+#else
+    QElapsedTimer timer;
+    timer.start();
+
+    refreshIncremental(deepRosInspection);
+    const QString queryLower = query.trimmed().toLower();
+    const int safeOffset = qMax(0, offset);
+    const int safeLimit = qMax(1, limit);
+    QJsonArray rows;
+    int total = 0;
+
+    if (!sortByCpu) {
+        // Stream pagination path: avoid copying/sorting the entire process set.
+        int emitted = 0;
+        const int pageEndExclusive = safeOffset + safeLimit;
+        for (auto it = pidIndex_.constBegin(); it != pidIndex_.constEnd(); ++it) {
+            const ProcLite& rec = it.value();
+            if (rosOnly && !rec.isRos) {
+                continue;
+            }
+            if (!queryLower.isEmpty()) {
+                const QString searchable =
+                    QString::number(rec.pid) + " " + rec.name + " " + rec.executable + " " + rec.commandLine;
+                if (!searchable.toLower().contains(queryLower)) {
+                    continue;
+                }
+            }
+            if (total >= safeOffset && total < pageEndExclusive && emitted < safeLimit) {
+                rows.append(toJsonRow(rec, memTotalKb_));
+                emitted++;
+            }
+            total++;
+        }
+    } else {
+        QList<ProcLite> filtered;
+        filtered.reserve(pidIndex_.size());
+        for (auto it = pidIndex_.constBegin(); it != pidIndex_.constEnd(); ++it) {
+            const ProcLite& rec = it.value();
+            if (rosOnly && !rec.isRos) {
+                continue;
+            }
+            if (!queryLower.isEmpty()) {
+                const QString searchable =
+                    QString::number(rec.pid) + " " + rec.name + " " + rec.executable + " " + rec.commandLine;
+                if (!searchable.toLower().contains(queryLower)) {
+                    continue;
+                }
+            }
+            filtered.push_back(rec);
+        }
+        total = filtered.size();
+        std::sort(filtered.begin(), filtered.end(), [](const ProcLite& a, const ProcLite& b) {
+            return a.cpuPercent > b.cpuPercent;
+        });
+        const int end = qMin(total, safeOffset + safeLimit);
+        for (int i = safeOffset; i < end; ++i) {
+            rows.append(toJsonRow(filtered.at(i), memTotalKb_));
+        }
+    }
+
+    Telemetry::instance().incrementCounter("process.list_paged_queries");
+    Telemetry::instance().setGauge("process.last_result_size", static_cast<double>(rows.size()));
+    Telemetry::instance().setGauge("process.last_total_filtered", static_cast<double>(total));
+    Telemetry::instance().recordDurationMs("process.query_ms", timer.elapsed());
+    return QJsonObject{{"rows", rows}, {"total", total}};
 #endif
 }
 

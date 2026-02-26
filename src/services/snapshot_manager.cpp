@@ -83,7 +83,7 @@ QJsonObject SnapshotManager::exportSnapshot(
         dir.mkpath("snapshots");
     }
 
-    const QString path = dir.filePath(QString("snapshots/roscoppe_snapshot_%1.%2").arg(ts, ext));
+    const QString path = dir.filePath(QString("snapshots/RosScope_snapshot_%1.%2").arg(ts, ext));
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         return {

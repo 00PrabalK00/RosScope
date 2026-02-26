@@ -114,10 +114,10 @@ QJsonObject RuntimeWorker::buildResponse(
     const QJsonObject& session,
     const QJsonObject& watchdog) const {
     QJsonObject snapshot;
+    Q_UNUSED(allProcesses);
     snapshot.insert("timestamp_utc", QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
     snapshot.insert("preset_name", presetName_);
     snapshot.insert("selected_domain", selectedDomain);
-    snapshot.insert("processes_all", allProcesses);
     snapshot.insert("processes_visible", visibleProcesses);
     snapshot.insert("domain_summaries", domainSummaries);
     snapshot.insert("domains", domainDetails);
@@ -171,6 +171,10 @@ void RuntimeWorker::pollNow() {
     QString selectedDomain = request_.value("selected_domain").toString("0");
     const int activeTab = request_.value("active_tab").toInt(0);
     const bool engineerMode = request_.value("engineer_mode").toBool(true);
+    const bool allScopeFastPath =
+        processScope.compare("All Processes", Qt::CaseInsensitive) == 0
+        && activeTab == 0
+        && processQuery.trimmed().isEmpty();
 
     const bool idleFastPath =
         consecutiveNoChangePolls_ >= 3
@@ -179,7 +183,15 @@ void RuntimeWorker::pollNow() {
         && (pollCounter_ % 2 == 0)
         && !lastAllProcesses_.isEmpty();
 
-    if (!idleFastPath) {
+    int filteredTotalCount = 0;
+    if (allScopeFastPath) {
+        const QJsonObject page = processManager_.listProcessesPaged(
+            false, "", false, processOffset, processLimit, false);
+        lastVisibleProcesses_ = page.value("rows").toArray();
+        filteredTotalCount = page.value("total").toInt(lastVisibleProcesses_.size());
+        idleBackoffMs_ = qMax(idleBackoffMs_, 5000);
+        Telemetry::instance().incrementCounter("sync.all_processes_fastpath_hits");
+    } else if (!idleFastPath) {
         const bool deepRosInspection = processScope.toLower() != "all processes";
         lastAllProcesses_ = processManager_.listProcesses(false, "", deepRosInspection);
         lastDomainSummaries_ = rosInspector_.listDomains(lastAllProcesses_);
@@ -187,14 +199,17 @@ void RuntimeWorker::pollNow() {
         Telemetry::instance().incrementCounter("sync.idle_fastpath_hits");
     }
 
-    const QJsonArray filteredProcesses =
-        applyProcessFilter(lastAllProcesses_, rosOnly, processQuery, processScope);
-    QJsonArray pagedProcesses;
-    const int end = qMin(filteredProcesses.size(), processOffset + processLimit);
-    for (int i = processOffset; i < end; ++i) {
-        pagedProcesses.append(filteredProcesses.at(i));
+    if (!allScopeFastPath) {
+        const QJsonArray filteredProcesses =
+            applyProcessFilter(lastAllProcesses_, rosOnly, processQuery, processScope);
+        QJsonArray pagedProcesses;
+        const int end = qMin(filteredProcesses.size(), processOffset + processLimit);
+        for (int i = processOffset; i < end; ++i) {
+            pagedProcesses.append(filteredProcesses.at(i));
+        }
+        lastVisibleProcesses_ = pagedProcesses;
+        filteredTotalCount = filteredProcesses.size();
     }
-    lastVisibleProcesses_ = pagedProcesses;
 
     QStringList knownDomains;
     for (const QJsonValue& value : lastDomainSummaries_) {
@@ -205,17 +220,22 @@ void RuntimeWorker::pollNow() {
         selectedDomain = knownDomains.isEmpty() ? "0" : knownDomains.first();
     }
 
+    const bool skipRosHeavy = allScopeFastPath;
+
     const bool refreshAllDomainDetails =
         activeTab == 1 || pollCounter_ % 4 == 0 || lastDomainDetails_.isEmpty();
     const bool refreshSelectedDomainDetail = activeTab == 2 || activeTab == 3;
 
+    QJsonArray domainDetails;
     QHash<QString, QJsonObject> detailByDomain;
     for (const QJsonValue& value : lastDomainDetails_) {
         const QJsonObject detail = value.toObject();
         detailByDomain.insert(detail.value("domain_id").toString("0"), detail);
     }
 
-    if (refreshAllDomainDetails) {
+    if (skipRosHeavy) {
+        domainDetails = lastDomainDetails_;
+    } else if (refreshAllDomainDetails) {
         detailByDomain.clear();
         for (const QString& domainId : knownDomains) {
             detailByDomain.insert(
@@ -226,22 +246,23 @@ void RuntimeWorker::pollNow() {
             selectedDomain, rosInspector_.inspectDomain(selectedDomain, lastAllProcesses_, false));
     }
 
-    QJsonArray domainDetails;
-    for (const QJsonValue& summaryValue : lastDomainSummaries_) {
-        const QJsonObject summary = summaryValue.toObject();
-        const QString domainId = summary.value("domain_id").toString("0");
+    if (!skipRosHeavy) {
+        for (const QJsonValue& summaryValue : lastDomainSummaries_) {
+            const QJsonObject summary = summaryValue.toObject();
+            const QString domainId = summary.value("domain_id").toString("0");
 
-        QJsonObject detail = detailByDomain.value(domainId);
-        if (detail.isEmpty()) {
-            detail.insert("domain_id", domainId);
-            detail.insert("nodes", QJsonArray{});
+            QJsonObject detail = detailByDomain.value(domainId);
+            if (detail.isEmpty()) {
+                detail.insert("domain_id", domainId);
+                detail.insert("nodes", QJsonArray{});
+            }
+
+            detail.insert("ros_process_count", summary.value("ros_process_count"));
+            detail.insert("domain_cpu_percent", summary.value("domain_cpu_percent"));
+            detail.insert("domain_memory_percent", summary.value("domain_memory_percent"));
+            detail.insert("workspace_count", summary.value("workspace_count"));
+            domainDetails.append(detail);
         }
-
-        detail.insert("ros_process_count", summary.value("ros_process_count"));
-        detail.insert("domain_cpu_percent", summary.value("domain_cpu_percent"));
-        detail.insert("domain_memory_percent", summary.value("domain_memory_percent"));
-        detail.insert("workspace_count", summary.value("workspace_count"));
-        domainDetails.append(detail);
     }
     lastDomainDetails_ = domainDetails;
 
@@ -256,10 +277,12 @@ void RuntimeWorker::pollNow() {
         (engineerMode && ((activeTab == 5) || pollCounter_ % 4 == 0))
         || (!engineerMode && pollCounter_ % (idleBackoffMs_ >= 4000 ? 16 : 8) == 0);
 
-    if (needGraph || lastGraph_.isEmpty() || lastGraph_.value("domain_id").toString() != selectedDomain) {
+    if (!skipRosHeavy
+        && (needGraph || lastGraph_.isEmpty() || lastGraph_.value("domain_id").toString() != selectedDomain)) {
         lastGraph_ = rosInspector_.inspectGraph(selectedDomain, lastAllProcesses_);
     }
-    if (needTf || lastTfNav2_.isEmpty() || lastTfNav2_.value("domain_id").toString() != selectedDomain) {
+    if (!skipRosHeavy
+        && (needTf || lastTfNav2_.isEmpty() || lastTfNav2_.value("domain_id").toString() != selectedDomain)) {
         lastTfNav2_ = rosInspector_.inspectTfNav2(selectedDomain);
     }
 
@@ -268,22 +291,26 @@ void RuntimeWorker::pollNow() {
         lastLogs_ = systemMonitor_.tailDmesg(300);
     }
 
-    lastHealth_ = healthMonitor_.evaluate(lastDomainDetails_, lastGraph_, lastTfNav2_);
+    if (!skipRosHeavy) {
+        lastHealth_ = healthMonitor_.evaluate(lastDomainDetails_, lastGraph_, lastTfNav2_);
+    }
 
     const bool deepSampling =
         engineerMode && (activeTab == 2 || activeTab == 3 || activeTab == 6 || activeTab == 7
         || activeTab == 8 || pollCounter_ % 3 == 0);
-    lastAdvanced_ = diagnosticsEngine_.evaluate(
-        selectedDomain,
-        lastAllProcesses_,
-        lastDomainDetails_,
-        lastGraph_,
-        lastTfNav2_,
-        lastSystem_,
-        lastHealth_,
-        parameterCache_,
-        deepSampling,
-        2000);
+    if (!skipRosHeavy) {
+        lastAdvanced_ = diagnosticsEngine_.evaluate(
+            selectedDomain,
+            lastAllProcesses_,
+            lastDomainDetails_,
+            lastGraph_,
+            lastTfNav2_,
+            lastSystem_,
+            lastHealth_,
+            parameterCache_,
+            deepSampling,
+            2000);
+    }
 
     if (watchdogEnabled_) {
         applyWatchdog(selectedDomain);
@@ -318,7 +345,7 @@ void RuntimeWorker::pollNow() {
         lastFleet_,
         sessionRecorder_.status(),
         lastWatchdog_);
-    response.insert("process_total_filtered", filteredProcesses.size());
+    response.insert("process_total_filtered", filteredTotalCount);
     response.insert("process_offset", processOffset);
     response.insert("process_limit", processLimit);
 

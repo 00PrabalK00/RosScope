@@ -15,6 +15,8 @@
 #include <QTreeWidget>
 #include <QString>
 #include <QStringList>
+#include <QVector>
+#include <QHash>
 
 #include "rrcc/runtime_worker.hpp"
 
@@ -47,6 +49,7 @@ private:
     void pruneNodeParameterCache();
     void updateProcessScopeOptions();
     void applyProcessTableMode();
+    bool isAllProcessesScopeActive() const;
 
     void renderFromSnapshot(const QJsonObject& snapshot);
     void renderProcesses();
@@ -55,6 +58,11 @@ private:
     void renderTfNav2();
     void renderSystemHardware();
     void renderLogs();
+    void renderDiagnosticsPanel();
+    void renderPerformancePanel();
+    void renderSafetyPanel();
+    void renderWorkspacePanel();
+    void renderFleetPanel();
     void renderHealthSummary();
 
     void runProcessAction(const QString& action);
@@ -151,6 +159,17 @@ private:
     QLabel* memLabel_ = nullptr;
     QLabel* diskLabel_ = nullptr;
     QLabel* gpuLabel_ = nullptr;
+    QLabel* cpuGraphLabel_ = nullptr;
+    QLabel* memGraphLabel_ = nullptr;
+    QLabel* diskGraphLabel_ = nullptr;
+    QLabel* netGraphLabel_ = nullptr;
+    QPlainTextEdit* htopPanel_ = nullptr;
+    QVector<double> cpuHistory_;
+    QVector<double> memHistory_;
+    QVector<double> diskHistory_;
+    QVector<double> netHistory_;
+    qint64 previousNetBytes_ = 0;
+    qint64 previousNetSampleMs_ = 0;
     QPlainTextEdit* usbText_ = nullptr;
     QPlainTextEdit* serialText_ = nullptr;
     QPlainTextEdit* canText_ = nullptr;
@@ -158,11 +177,16 @@ private:
 
     QPlainTextEdit* logsText_ = nullptr;
 
-    QPlainTextEdit* diagnosticsText_ = nullptr;
-    QPlainTextEdit* performanceText_ = nullptr;
-    QPlainTextEdit* safetyText_ = nullptr;
-    QPlainTextEdit* workspaceText_ = nullptr;
-    QPlainTextEdit* fleetText_ = nullptr;
+    QLabel* diagnosticsSummaryLabel_ = nullptr;
+    QTableWidget* diagnosticsTable_ = nullptr;
+    QLabel* performanceSummaryLabel_ = nullptr;
+    QTableWidget* performanceTable_ = nullptr;
+    QLabel* safetySummaryLabel_ = nullptr;
+    QTableWidget* safetyTable_ = nullptr;
+    QLabel* workspaceSummaryLabel_ = nullptr;
+    QTableWidget* workspaceTable_ = nullptr;
+    QLabel* fleetSummaryLabel_ = nullptr;
+    QTableWidget* fleetTable_ = nullptr;
 };
 
 }  // namespace rrcc

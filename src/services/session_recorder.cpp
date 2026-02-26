@@ -9,7 +9,7 @@ namespace rrcc {
 
 QJsonObject SessionRecorder::start(const QString& sessionName) {
     active_ = true;
-    sessionName_ = sessionName.trimmed().isEmpty() ? "roscoppe_session" : sessionName.trimmed();
+    sessionName_ = sessionName.trimmed().isEmpty() ? "RosScope_session" : sessionName.trimmed();
     startedUtc_ = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
     endedUtc_.clear();
     samples_ = QJsonArray{};

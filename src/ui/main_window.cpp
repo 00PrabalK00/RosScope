@@ -21,6 +21,8 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QCryptographicHash>
+#include <QIcon>
+#include <QStyle>
 #include <QVBoxLayout>
 
 #include "rrcc/telemetry.hpp"
@@ -28,10 +30,6 @@
 namespace rrcc {
 
 namespace {
-
-QString jsonToPretty(const QJsonObject& object) {
-    return QString::fromUtf8(QJsonDocument(object).toJson(QJsonDocument::Indented));
-}
 
 QString joinArrayLines(const QJsonArray& array) {
     QStringList lines;
@@ -46,6 +44,83 @@ QString joinArrayLines(const QJsonArray& array) {
     return lines.join('\n');
 }
 
+QString boolText(bool value) {
+    return value ? "Yes" : "No";
+}
+
+QString formatBytes(double bytes) {
+    const double absBytes = qAbs(bytes);
+    if (absBytes >= 1024.0 * 1024.0 * 1024.0) {
+        return QString("%1 GB").arg(bytes / (1024.0 * 1024.0 * 1024.0), 0, 'f', 2);
+    }
+    if (absBytes >= 1024.0 * 1024.0) {
+        return QString("%1 MB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1);
+    }
+    if (absBytes >= 1024.0) {
+        return QString("%1 KB").arg(bytes / 1024.0, 0, 'f', 1);
+    }
+    return QString("%1 B").arg(bytes, 0, 'f', 0);
+}
+
+QString formatNetworkInterfaces(const QJsonArray& interfaces) {
+    if (interfaces.isEmpty()) {
+        return "No network interfaces detected.";
+    }
+    QStringList lines;
+    for (const QJsonValue& value : interfaces) {
+        const QJsonObject iface = value.toObject();
+        const QString name = iface.value("name").toString("unknown");
+        const bool up = iface.value("is_up").toBool(false);
+        const bool running = iface.value("is_running").toBool(false);
+        const double rxBytes = iface.value("rx_bytes").toDouble(0.0);
+        const double txBytes = iface.value("tx_bytes").toDouble(0.0);
+        const QJsonArray addresses = iface.value("addresses").toArray();
+        QStringList addrList;
+        addrList.reserve(addresses.size());
+        for (const QJsonValue& addr : addresses) {
+            addrList.append(addr.toString());
+        }
+        const QString addrText = addrList.isEmpty() ? "-" : addrList.join(", ");
+        lines << QString("%1 | up:%2 running:%3 | rx:%4 tx:%5")
+                     .arg(name, up ? "yes" : "no", running ? "yes" : "no", formatBytes(rxBytes), formatBytes(txBytes));
+        lines << QString("  addresses: %1").arg(addrText);
+    }
+    return lines.join('\n');
+}
+
+void populateKeyValueTable(
+    QTableWidget* table,
+    const QVector<QPair<QString, QString>>& rows,
+    const QSet<int>& warningRows = {},
+    const QSet<int>& criticalRows = {}) {
+    if (table == nullptr) {
+        return;
+    }
+    table->clearContents();
+    table->setRowCount(rows.size());
+    for (int row = 0; row < rows.size(); ++row) {
+        auto* keyItem = new QTableWidgetItem(rows.at(row).first);
+        auto* valueItem = new QTableWidgetItem(rows.at(row).second);
+        if (criticalRows.contains(row)) {
+            const QColor bg("#432125");
+            const QColor fg("#ffd6da");
+            keyItem->setBackground(QBrush(bg));
+            valueItem->setBackground(QBrush(bg));
+            keyItem->setForeground(QBrush(fg));
+            valueItem->setForeground(QBrush(fg));
+        } else if (warningRows.contains(row)) {
+            const QColor bg("#3f3823");
+            const QColor fg("#ffefc7");
+            keyItem->setBackground(QBrush(bg));
+            valueItem->setBackground(QBrush(bg));
+            keyItem->setForeground(QBrush(fg));
+            valueItem->setForeground(QBrush(fg));
+        }
+        table->setItem(row, 0, keyItem);
+        table->setItem(row, 1, valueItem);
+    }
+}
+
 qint64 pidFromRow(const QTableWidget* table, int row) {
     if (row < 0 || table->item(row, 0) == nullptr) {
         return -1;
@@ -56,6 +131,55 @@ qint64 pidFromRow(const QTableWidget* table, int row) {
 QString hashArray(const QJsonArray& value) {
     const QByteArray payload = QJsonDocument(value).toJson(QJsonDocument::Compact);
     return QString::fromLatin1(QCryptographicHash::hash(payload, QCryptographicHash::Sha1).toHex());
+}
+
+QString readLocalTextFile(const QString& path) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return {};
+    }
+    return QString::fromUtf8(file.readAll());
+}
+
+void appendHistory(QVector<double>* values, double sample, int maxSize = 40) {
+    values->append(sample);
+    while (values->size() > maxSize) {
+        values->removeFirst();
+    }
+}
+
+QString sparkline(const QVector<double>& values, double maxValue = 100.0) {
+    static const char* blocks[] = {" ", ".", ":", "-", "=", "+", "*", "#", "%", "@"};
+    if (values.isEmpty()) {
+        return "(no data)";
+    }
+    double scaleMax = maxValue;
+    for (double v : values) {
+        if (v > scaleMax) {
+            scaleMax = v;
+        }
+    }
+    scaleMax = qMax(1.0, scaleMax);
+
+    QString out;
+    out.reserve(values.size());
+    for (double v : values) {
+        const double norm = qBound(0.0, v / scaleMax, 1.0);
+        const int idx = qBound(0, static_cast<int>(norm * 9.0), 9);
+        out += blocks[idx];
+    }
+    return out;
+}
+
+QIcon themedIcon(const QWidget* widget, const QString& themeName, QStyle::StandardPixmap fallback) {
+    const QIcon icon = QIcon::fromTheme(themeName);
+    if (!icon.isNull()) {
+        return icon;
+    }
+    if (widget != nullptr) {
+        return widget->style()->standardIcon(fallback);
+    }
+    return {};
 }
 
 }  // namespace
@@ -76,85 +200,172 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::setupUi() {
-    setWindowTitle("Roscoppe");
+    setWindowTitle("RosScope");
     resize(1560, 940);
     setMinimumSize(1100, 700);
     setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
 
     central_ = new QWidget(this);
     setCentralWidget(central_);
+    setStyleSheet(
+        "QWidget { background:#171b20; color:#e3e7ec; font-size:13px; }"
+        "QLabel { color:#e3e7ec; }"
+        "QPushButton { background:#2a3138; color:#f0f3f6; border:1px solid #3a444f; border-radius:8px; padding:6px 10px; }"
+        "QPushButton:hover { background:#333c45; }"
+        "QPushButton:pressed { background:#242b32; }"
+        "QPushButton:disabled { background:#21272d; color:#8f9ba7; border-color:#313941; }"
+        "QToolButton { background:#2a3138; color:#f0f3f6; border:1px solid #3a444f; border-radius:8px; padding:6px 10px; }"
+        "QToolButton:hover { background:#333c45; }"
+        "QLineEdit, QComboBox, QPlainTextEdit, QTreeWidget, QTableWidget {"
+        "  background:#1f252c; color:#e3e7ec; border:1px solid #3a444f; border-radius:8px; selection-background-color:#4d6a55; }"
+        "QTableWidget {"
+        "  background:#1f252c; alternate-background-color:#26303a; color:#e6edf5; gridline-color:#34414d; }"
+        "QTableWidget::item { color:#e6edf5; padding:4px; }"
+        "QTableWidget::item:selected { background:#3d5c4c; color:#f4f9ff; }"
+        "QTreeWidget { background:#1f252c; alternate-background-color:#26303a; color:#e6edf5; }"
+        "QTreeWidget::item { color:#e6edf5; }"
+        "QTreeWidget::item:selected { background:#3d5c4c; color:#f4f9ff; }"
+        "QTabWidget::pane { border:1px solid #3a444f; border-radius:10px; background:#1b2127; }"
+        "QTabBar::tab { background:#272f37; color:#c7d0d9; border:1px solid #3a444f; border-bottom:none; padding:8px 12px; margin-right:2px; border-top-left-radius:8px; border-top-right-radius:8px; }"
+        "QTabBar::tab:selected { background:#34404a; color:#f4f7fa; }"
+        "QHeaderView::section { background:#2a3138; color:#d3dce5; border:1px solid #3a444f; padding:6px; }"
+        "QStatusBar { background:#1d232a; color:#9faebb; border-top:1px solid #3a444f; }");
 
     auto* root = new QVBoxLayout(central_);
     root->setContentsMargins(10, 10, 10, 10);
     root->setSpacing(8);
 
     auto* header = new QHBoxLayout();
-    auto* title = new QLabel("Roscoppe");
+    auto* title = new QLabel("RosScope");
     title->setStyleSheet("font-size: 20px; font-weight: 700;");
     auto* aboutButton = new QPushButton("About");
+    aboutButton->setIcon(themedIcon(this, "help-about", QStyle::SP_MessageBoxInformation));
 
     modeCombo_ = new QComboBox();
     modeCombo_->addItems({"Engineer", "Operator"});
 
     auto* refreshButton = new QPushButton("Refresh");
+    refreshButton->setIcon(themedIcon(this, "view-refresh", QStyle::SP_BrowserReload));
     emergencyStopButton_ = new QPushButton("Emergency Stop (Kill ROS)");
+    emergencyStopButton_->setIcon(themedIcon(this, "process-stop", QStyle::SP_BrowserStop));
     emergencyStopButton_->setStyleSheet("background:#d64545;color:white;font-weight:700;");
     snapshotJsonButton_ = new QPushButton("Snapshot JSON");
+    snapshotJsonButton_->setIcon(themedIcon(this, "document-save", QStyle::SP_DialogSaveButton));
     snapshotYamlButton_ = new QPushButton("Snapshot YAML");
+    snapshotYamlButton_->setIcon(themedIcon(this, "document-save-as", QStyle::SP_DialogSaveButton));
     compareSnapshotButton_ = new QPushButton("Snapshot Diff");
+    compareSnapshotButton_->setIcon(themedIcon(this, "view-sort-descending", QStyle::SP_ArrowDown));
     savePresetButton_ = new QPushButton("Save Preset");
+    savePresetButton_->setIcon(themedIcon(this, "document-save", QStyle::SP_DialogSaveButton));
     loadPresetButton_ = new QPushButton("Load Preset");
+    loadPresetButton_->setIcon(themedIcon(this, "document-open", QStyle::SP_DialogOpenButton));
     sessionStartButton_ = new QPushButton("Start Session");
+    sessionStartButton_->setIcon(themedIcon(this, "media-playback-start", QStyle::SP_MediaPlay));
     sessionStopButton_ = new QPushButton("Stop Session");
+    sessionStopButton_->setIcon(themedIcon(this, "media-playback-stop", QStyle::SP_MediaStop));
     sessionExportButton_ = new QPushButton("Export Session");
+    sessionExportButton_->setIcon(themedIcon(this, "document-export", QStyle::SP_DialogSaveButton));
     telemetryExportButton_ = new QPushButton("Export Telemetry");
+    telemetryExportButton_->setIcon(themedIcon(this, "document-export", QStyle::SP_DialogSaveButton));
     watchdogToggleButton_ = new QPushButton("Watchdog: OFF");
+    watchdogToggleButton_->setIcon(themedIcon(this, "security-high", QStyle::SP_MessageBoxWarning));
     fleetRefreshButton_ = new QPushButton("Fleet Refresh");
+    fleetRefreshButton_->setIcon(themedIcon(this, "view-refresh", QStyle::SP_BrowserReload));
     fleetLoadTargetsButton_ = new QPushButton("Load Fleet Targets");
+    fleetLoadTargetsButton_->setIcon(themedIcon(this, "folder-open", QStyle::SP_DialogOpenButton));
     remoteRestartButton_ = new QPushButton("Remote Restart");
+    remoteRestartButton_->setIcon(themedIcon(this, "system-reboot", QStyle::SP_BrowserReload));
     remoteKillButton_ = new QPushButton("Remote Kill");
+    remoteKillButton_->setIcon(themedIcon(this, "process-stop", QStyle::SP_BrowserStop));
     healthLabel_ = new QLabel("Health: UNKNOWN");
     healthLabel_->setStyleSheet(
-        "font-size:16px;font-weight:800;padding:6px 10px;border-radius:8px;background:#eeeeee;color:#333333;");
+        "font-size:16px;font-weight:800;padding:6px 10px;border-radius:8px;background:#26303a;color:#dce8f5;");
     presetLabel_ = new QLabel("Preset: default");
     emergencyStopButton_->setMinimumHeight(34);
 
     auto* snapshotMenu = new QMenu(this);
-    snapshotMenu->addAction("JSON", [this]() { snapshotJsonButton_->click(); });
-    snapshotMenu->addAction("YAML", [this]() { snapshotYamlButton_->click(); });
-    snapshotMenu->addAction("Diff", [this]() { compareSnapshotButton_->click(); });
+    snapshotMenu->addAction(
+        themedIcon(this, "document-save", QStyle::SP_DialogSaveButton),
+        "JSON",
+        [this]() { snapshotJsonButton_->click(); });
+    snapshotMenu->addAction(
+        themedIcon(this, "document-save-as", QStyle::SP_DialogSaveButton),
+        "YAML",
+        [this]() { snapshotYamlButton_->click(); });
+    snapshotMenu->addAction(
+        themedIcon(this, "view-sort-descending", QStyle::SP_ArrowDown),
+        "Diff",
+        [this]() { compareSnapshotButton_->click(); });
     auto* snapshotMenuButton = new QToolButton(this);
+    snapshotMenuButton->setIcon(themedIcon(this, "document-save", QStyle::SP_DialogSaveButton));
     snapshotMenuButton->setText("Snapshot");
     snapshotMenuButton->setMenu(snapshotMenu);
     snapshotMenuButton->setPopupMode(QToolButton::InstantPopup);
+    snapshotMenuButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
 
     auto* sessionMenu = new QMenu(this);
-    sessionMenu->addAction("Start", [this]() { sessionStartButton_->click(); });
-    sessionMenu->addAction("Stop", [this]() { sessionStopButton_->click(); });
-    sessionMenu->addAction("Export", [this]() { sessionExportButton_->click(); });
-    sessionMenu->addAction("Export Telemetry", [this]() { telemetryExportButton_->click(); });
+    sessionMenu->addAction(
+        themedIcon(this, "media-playback-start", QStyle::SP_MediaPlay),
+        "Start",
+        [this]() { sessionStartButton_->click(); });
+    sessionMenu->addAction(
+        themedIcon(this, "media-playback-stop", QStyle::SP_MediaStop),
+        "Stop",
+        [this]() { sessionStopButton_->click(); });
+    sessionMenu->addAction(
+        themedIcon(this, "document-export", QStyle::SP_DialogSaveButton),
+        "Export",
+        [this]() { sessionExportButton_->click(); });
+    sessionMenu->addAction(
+        themedIcon(this, "document-export", QStyle::SP_DialogSaveButton),
+        "Export Telemetry",
+        [this]() { telemetryExportButton_->click(); });
     auto* sessionMenuButton = new QToolButton(this);
+    sessionMenuButton->setIcon(themedIcon(this, "view-calendar", QStyle::SP_FileDialogDetailedView));
     sessionMenuButton->setText("Session");
     sessionMenuButton->setMenu(sessionMenu);
     sessionMenuButton->setPopupMode(QToolButton::InstantPopup);
+    sessionMenuButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
 
     auto* presetMenu = new QMenu(this);
-    presetMenu->addAction("Save", [this]() { savePresetButton_->click(); });
-    presetMenu->addAction("Load", [this]() { loadPresetButton_->click(); });
+    presetMenu->addAction(
+        themedIcon(this, "document-save", QStyle::SP_DialogSaveButton),
+        "Save",
+        [this]() { savePresetButton_->click(); });
+    presetMenu->addAction(
+        themedIcon(this, "document-open", QStyle::SP_DialogOpenButton),
+        "Load",
+        [this]() { loadPresetButton_->click(); });
     auto* presetMenuButton = new QToolButton(this);
+    presetMenuButton->setIcon(themedIcon(this, "document-properties", QStyle::SP_FileDialogInfoView));
     presetMenuButton->setText("Preset");
     presetMenuButton->setMenu(presetMenu);
     presetMenuButton->setPopupMode(QToolButton::InstantPopup);
+    presetMenuButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
 
     auto* fleetMenu = new QMenu(this);
-    fleetMenu->addAction("Load Targets", [this]() { fleetLoadTargetsButton_->click(); });
-    fleetMenu->addAction("Refresh", [this]() { fleetRefreshButton_->click(); });
-    fleetMenu->addAction("Remote Restart", [this]() { remoteRestartButton_->click(); });
-    fleetMenu->addAction("Remote Kill", [this]() { remoteKillButton_->click(); });
+    fleetMenu->addAction(
+        themedIcon(this, "folder-open", QStyle::SP_DialogOpenButton),
+        "Load Targets",
+        [this]() { fleetLoadTargetsButton_->click(); });
+    fleetMenu->addAction(
+        themedIcon(this, "view-refresh", QStyle::SP_BrowserReload),
+        "Refresh",
+        [this]() { fleetRefreshButton_->click(); });
+    fleetMenu->addAction(
+        themedIcon(this, "system-reboot", QStyle::SP_BrowserReload),
+        "Remote Restart",
+        [this]() { remoteRestartButton_->click(); });
+    fleetMenu->addAction(
+        themedIcon(this, "process-stop", QStyle::SP_BrowserStop),
+        "Remote Kill",
+        [this]() { remoteKillButton_->click(); });
     auto* fleetMenuButton = new QToolButton(this);
+    fleetMenuButton->setIcon(themedIcon(this, "network-workgroup", QStyle::SP_DirIcon));
     fleetMenuButton->setText("Fleet");
     fleetMenuButton->setMenu(fleetMenu);
     fleetMenuButton->setPopupMode(QToolButton::InstantPopup);
+    fleetMenuButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
 
     auto* leftZone = new QHBoxLayout();
     leftZone->addWidget(title);
@@ -198,10 +409,15 @@ void MainWindow::setupUi() {
     processViewModeCombo_->setCurrentIndex(0);
     processPrevButton_ = new QPushButton("Prev");
     processNextButton_ = new QPushButton("Next");
+    processPrevButton_->setIcon(themedIcon(this, "go-previous", QStyle::SP_ArrowBack));
+    processNextButton_->setIcon(themedIcon(this, "go-next", QStyle::SP_ArrowForward));
     processPageLabel_ = new QLabel("Rows 0-0 / 0");
     terminateButton_ = new QPushButton("SIGTERM");
     forceKillButton_ = new QPushButton("SIGKILL");
     killTreeButton_ = new QPushButton("Kill Tree");
+    terminateButton_->setIcon(themedIcon(this, "media-playback-stop", QStyle::SP_MediaStop));
+    forceKillButton_->setIcon(themedIcon(this, "process-stop", QStyle::SP_BrowserStop));
+    killTreeButton_->setIcon(themedIcon(this, "edit-delete", QStyle::SP_TrashIcon));
     processControls->addWidget(processSearch_, 1);
     processControls->addWidget(processScopeCombo_);
     processControls->addWidget(processViewModeCombo_);
@@ -221,6 +437,7 @@ void MainWindow::setupUi() {
     processTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     processTable_->setSelectionMode(QAbstractItemView::SingleSelection);
     processTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    processTable_->setAlternatingRowColors(true);
     processTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     processTable_->horizontalHeader()->setStretchLastSection(true);
     processLayout->addWidget(processTable_, 1);
@@ -236,6 +453,7 @@ void MainWindow::setupUi() {
     domainTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     domainTable_->setSelectionMode(QAbstractItemView::SingleSelection);
     domainTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    domainTable_->setAlternatingRowColors(true);
     domainTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     domainTable_->horizontalHeader()->setStretchLastSection(true);
     domainLayout->addWidget(domainTable_, 0);
@@ -247,6 +465,7 @@ void MainWindow::setupUi() {
     domainNodeTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     domainNodeTable_->setSelectionMode(QAbstractItemView::SingleSelection);
     domainNodeTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    domainNodeTable_->setAlternatingRowColors(true);
     domainNodeTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     domainNodeTable_->horizontalHeader()->setStretchLastSection(true);
     domainLayout->addWidget(domainNodeTable_, 1);
@@ -255,11 +474,15 @@ void MainWindow::setupUi() {
     restartDomainButton_ = new QPushButton("Restart Domain");
     isolateDomainButton_ = new QPushButton("Isolate Domain");
     clearShmButton_ = new QPushButton("Clear Shared Memory");
+    restartDomainButton_->setIcon(themedIcon(this, "system-reboot", QStyle::SP_BrowserReload));
+    isolateDomainButton_->setIcon(themedIcon(this, "network-disconnect", QStyle::SP_DialogCancelButton));
+    clearShmButton_->setIcon(themedIcon(this, "edit-clear", QStyle::SP_DialogResetButton));
     workspacePathInput_ = new QLineEdit();
     workspacePathInput_->setPlaceholderText("Workspace path (e.g. /home/user/ws/install)");
     workspaceRelaunchInput_ = new QLineEdit();
     workspaceRelaunchInput_->setPlaceholderText("Optional relaunch command");
     restartWorkspaceButton_ = new QPushButton("Restart Workspace");
+    restartWorkspaceButton_->setIcon(themedIcon(this, "system-reboot", QStyle::SP_BrowserReload));
     domainControls->addWidget(restartDomainButton_);
     domainControls->addWidget(isolateDomainButton_);
     domainControls->addWidget(clearShmButton_);
@@ -287,6 +510,7 @@ void MainWindow::setupUi() {
     paramsText_->setReadOnly(true);
     paramsText_->setPlaceholderText("Selected node parameters...");
     fetchParamsButton_ = new QPushButton("Fetch Parameters for Selected Node");
+    fetchParamsButton_->setIcon(themedIcon(this, "view-refresh", QStyle::SP_BrowserReload));
     nodeRightLayout->addWidget(new QLabel("QoS / Graph Alerts"));
     nodeRightLayout->addWidget(qosText_, 1);
     nodeRightLayout->addWidget(fetchParamsButton_);
@@ -302,6 +526,7 @@ void MainWindow::setupUi() {
     tfTable_->setColumnCount(2);
     tfTable_->setHorizontalHeaderLabels({"Parent Frame", "Child Frame"});
     tfTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    tfTable_->setAlternatingRowColors(true);
     tfTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     tfTable_->horizontalHeader()->setStretchLastSection(true);
     nav2Text_ = new QPlainTextEdit();
@@ -324,6 +549,29 @@ void MainWindow::setupUi() {
     summary->addWidget(gpuLabel_);
     summary->addStretch(1);
     systemLayout->addLayout(summary);
+
+    auto* graphBox = new QWidget();
+    auto* graphLayout = new QVBoxLayout(graphBox);
+    cpuGraphLabel_ = new QLabel("CPU graph: (no data)");
+    memGraphLabel_ = new QLabel("MEM graph: (no data)");
+    diskGraphLabel_ = new QLabel("DISK graph: (no data)");
+    netGraphLabel_ = new QLabel("NET graph: (no data)");
+    cpuGraphLabel_->setStyleSheet("font-family:monospace;");
+    memGraphLabel_->setStyleSheet("font-family:monospace;");
+    diskGraphLabel_->setStyleSheet("font-family:monospace;");
+    netGraphLabel_->setStyleSheet("font-family:monospace;");
+    graphLayout->addWidget(cpuGraphLabel_);
+    graphLayout->addWidget(memGraphLabel_);
+    graphLayout->addWidget(diskGraphLabel_);
+    graphLayout->addWidget(netGraphLabel_);
+    systemLayout->addWidget(graphBox);
+
+    htopPanel_ = new QPlainTextEdit();
+    htopPanel_->setReadOnly(true);
+    htopPanel_->setMaximumHeight(170);
+    htopPanel_->setStyleSheet("font-family:monospace;");
+    htopPanel_->setPlaceholderText("Runtime activity summary...");
+    systemLayout->addWidget(htopPanel_);
 
     auto* hardwareSplitter = new QSplitter(Qt::Horizontal);
     usbText_ = new QPlainTextEdit();
@@ -354,38 +602,83 @@ void MainWindow::setupUi() {
 
     auto* diagnosticsTab = new QWidget();
     auto* diagnosticsLayout = new QVBoxLayout(diagnosticsTab);
-    diagnosticsText_ = new QPlainTextEdit();
-    diagnosticsText_->setReadOnly(true);
-    diagnosticsLayout->addWidget(diagnosticsText_, 1);
-    tabs_->addTab(diagnosticsTab, "Diagnostics");
+    diagnosticsSummaryLabel_ = new QLabel("Diagnostics overview");
+    diagnosticsSummaryLabel_->setStyleSheet("font-size:14px;font-weight:700;");
+    diagnosticsTable_ = new QTableWidget();
+    diagnosticsTable_->setColumnCount(2);
+    diagnosticsTable_->setHorizontalHeaderLabels({"Check", "Result"});
+    diagnosticsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    diagnosticsTable_->setSelectionMode(QAbstractItemView::NoSelection);
+    diagnosticsTable_->setAlternatingRowColors(true);
+    diagnosticsTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    diagnosticsTable_->horizontalHeader()->setStretchLastSection(true);
+    diagnosticsLayout->addWidget(diagnosticsSummaryLabel_);
+    diagnosticsLayout->addWidget(diagnosticsTable_, 1);
+    tabs_->addTab(diagnosticsTab, themedIcon(this, "utilities-system-monitor", QStyle::SP_ComputerIcon), "Diagnostics");
 
     auto* performanceTab = new QWidget();
     auto* performanceLayout = new QVBoxLayout(performanceTab);
-    performanceText_ = new QPlainTextEdit();
-    performanceText_->setReadOnly(true);
-    performanceLayout->addWidget(performanceText_, 1);
-    tabs_->addTab(performanceTab, "Performance");
+    performanceSummaryLabel_ = new QLabel("Performance metrics");
+    performanceSummaryLabel_->setStyleSheet("font-size:14px;font-weight:700;");
+    performanceTable_ = new QTableWidget();
+    performanceTable_->setColumnCount(2);
+    performanceTable_->setHorizontalHeaderLabels({"Metric", "Value"});
+    performanceTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    performanceTable_->setSelectionMode(QAbstractItemView::NoSelection);
+    performanceTable_->setAlternatingRowColors(true);
+    performanceTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    performanceTable_->horizontalHeader()->setStretchLastSection(true);
+    performanceLayout->addWidget(performanceSummaryLabel_);
+    performanceLayout->addWidget(performanceTable_, 1);
+    tabs_->addTab(performanceTab, themedIcon(this, "office-chart-line", QStyle::SP_ArrowUp), "Performance");
 
     auto* safetyTab = new QWidget();
     auto* safetyLayout = new QVBoxLayout(safetyTab);
-    safetyText_ = new QPlainTextEdit();
-    safetyText_->setReadOnly(true);
-    safetyLayout->addWidget(safetyText_, 1);
-    tabs_->addTab(safetyTab, "Safety");
+    safetySummaryLabel_ = new QLabel("Safety status");
+    safetySummaryLabel_->setStyleSheet("font-size:14px;font-weight:700;");
+    safetyTable_ = new QTableWidget();
+    safetyTable_->setColumnCount(2);
+    safetyTable_->setHorizontalHeaderLabels({"Signal", "State"});
+    safetyTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    safetyTable_->setSelectionMode(QAbstractItemView::NoSelection);
+    safetyTable_->setAlternatingRowColors(true);
+    safetyTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    safetyTable_->horizontalHeader()->setStretchLastSection(true);
+    safetyLayout->addWidget(safetySummaryLabel_);
+    safetyLayout->addWidget(safetyTable_, 1);
+    tabs_->addTab(safetyTab, themedIcon(this, "security-high", QStyle::SP_MessageBoxWarning), "Safety");
 
     auto* workspaceTab = new QWidget();
     auto* workspaceLayout = new QVBoxLayout(workspaceTab);
-    workspaceText_ = new QPlainTextEdit();
-    workspaceText_->setReadOnly(true);
-    workspaceLayout->addWidget(workspaceText_, 1);
-    tabs_->addTab(workspaceTab, "Workspaces");
+    workspaceSummaryLabel_ = new QLabel("Workspace health");
+    workspaceSummaryLabel_->setStyleSheet("font-size:14px;font-weight:700;");
+    workspaceTable_ = new QTableWidget();
+    workspaceTable_->setColumnCount(2);
+    workspaceTable_->setHorizontalHeaderLabels({"Item", "Details"});
+    workspaceTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    workspaceTable_->setSelectionMode(QAbstractItemView::NoSelection);
+    workspaceTable_->setAlternatingRowColors(true);
+    workspaceTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    workspaceTable_->horizontalHeader()->setStretchLastSection(true);
+    workspaceLayout->addWidget(workspaceSummaryLabel_);
+    workspaceLayout->addWidget(workspaceTable_, 1);
+    tabs_->addTab(workspaceTab, themedIcon(this, "folder-development", QStyle::SP_DirIcon), "Workspaces");
 
     auto* fleetTab = new QWidget();
     auto* fleetLayout = new QVBoxLayout(fleetTab);
-    fleetText_ = new QPlainTextEdit();
-    fleetText_->setReadOnly(true);
-    fleetLayout->addWidget(fleetText_, 1);
-    tabs_->addTab(fleetTab, "Fleet");
+    fleetSummaryLabel_ = new QLabel("Fleet status");
+    fleetSummaryLabel_->setStyleSheet("font-size:14px;font-weight:700;");
+    fleetTable_ = new QTableWidget();
+    fleetTable_->setColumnCount(5);
+    fleetTable_->setHorizontalHeaderLabels({"Target", "Reachability", "Nodes", "Load", "Mem Avail (KB)"});
+    fleetTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    fleetTable_->setSelectionMode(QAbstractItemView::NoSelection);
+    fleetTable_->setAlternatingRowColors(true);
+    fleetTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    fleetTable_->horizontalHeader()->setStretchLastSection(true);
+    fleetLayout->addWidget(fleetSummaryLabel_);
+    fleetLayout->addWidget(fleetTable_, 1);
+    tabs_->addTab(fleetTab, themedIcon(this, "network-workgroup", QStyle::SP_DirIcon), "Fleet");
     tabs_->setCurrentIndex(2);
 
     refreshTimer_ = new QTimer(this);
@@ -404,8 +697,8 @@ void MainWindow::setupUi() {
     connect(aboutButton, &QPushButton::clicked, this, [this]() {
         QMessageBox::about(
             this,
-            "About Roscoppe",
-            "Roscoppe\n\n"
+            "About RosScope",
+            "RosScope\n\n"
             "A ROS 2 runtime inspector for nodes, domains, TF/Nav2 health, "
             "process diagnostics, and operational controls.\n\n"
             "Built and maintained by Prabal Khare.");
@@ -438,7 +731,9 @@ void MainWindow::setupConnections() {
     connect(worker_, &RuntimeWorker::snapshotReady, this, [this](const QJsonObject& snapshot) {
         refreshInFlight_ = false;
         renderFromSnapshot(snapshot);
-        scheduleRefresh(refreshIntervalMs_);
+        if (!isAllProcessesScopeActive()) {
+            scheduleRefresh(refreshIntervalMs_);
+        }
     });
     connect(worker_, &RuntimeWorker::actionFinished, this, [this](const QJsonObject& result) {
         refreshInFlight_ = false;
@@ -459,8 +754,16 @@ void MainWindow::setupConnections() {
             }
         }
 
-        if ((action == "compare_snapshots" || action == "compare_with_previous") && diagnosticsText_ != nullptr) {
-            diagnosticsText_->setPlainText(jsonToPretty(result));
+        if (action == "compare_snapshots" || action == "compare_with_previous") {
+            const QJsonObject summary = result.value("summary").toObject();
+            if (diagnosticsSummaryLabel_ != nullptr && !summary.isEmpty()) {
+                diagnosticsSummaryLabel_->setText(
+                    QString("Diagnostics overview | Snapshot diff nodes +%1/-%2, topics +%3/-%4")
+                        .arg(summary.value("nodes_added").toInt(0))
+                        .arg(summary.value("nodes_removed").toInt(0))
+                        .arg(summary.value("topics_added").toInt(0))
+                        .arg(summary.value("topics_removed").toInt(0)));
+            }
         }
         if ((action == "load_preset" || action == "save_preset") && success && presetLabel_ != nullptr) {
             presetLabel_->setText(
@@ -468,9 +771,7 @@ void MainWindow::setupConnections() {
         }
         if ((action == "fleet_refresh" || action == "remote_action") && result.contains("fleet")) {
             cachedFleet_ = result.value("fleet").toObject();
-            if (fleetText_ != nullptr) {
-                fleetText_->setPlainText(jsonToPretty(cachedFleet_));
-            }
+            renderFleetPanel();
         }
         if ((action == "watchdog_enable" || action == "watchdog_disable") && watchdogToggleButton_ != nullptr) {
             const bool enabled = action == "watchdog_enable";
@@ -746,11 +1047,12 @@ void MainWindow::applyMode() {
 
 QJsonObject MainWindow::buildPollRequest() const {
     QJsonObject request;
+    const bool allProcessesScope = processScopeCombo_->currentText() == "All Processes";
     request.insert("process_scope", processScopeCombo_->currentText());
     request.insert("ros_only", processScopeCombo_->currentText() == "ROS Only");
     request.insert("process_query", processSearch_->text().trimmed());
     request.insert("process_offset", processOffset_);
-    request.insert("process_limit", processLimit_);
+    request.insert("process_limit", allProcessesScope ? qMin(processLimit_, 80) : processLimit_);
     request.insert("selected_domain", selectedDomainId());
     request.insert("engineer_mode", modeCombo_->currentText() == "Engineer");
     request.insert("active_tab", tabs_->currentIndex());
@@ -761,6 +1063,9 @@ QJsonObject MainWindow::buildPollRequest() const {
 
 void MainWindow::scheduleRefresh(int delayMs, bool force) {
     if (refreshTimer_ == nullptr) {
+        return;
+    }
+    if (!force && isAllProcessesScopeActive()) {
         return;
     }
     if (refreshInFlight_ && !force) {
@@ -790,6 +1095,13 @@ QString MainWindow::selectedDomainId() const {
         return cachedDomainSummaries_.first().toObject().value("domain_id").toString("0");
     }
     return "0";
+}
+
+bool MainWindow::isAllProcessesScopeActive() const {
+    return tabs_ != nullptr
+        && tabs_->currentIndex() == 0
+        && processScopeCombo_ != nullptr
+        && processScopeCombo_->currentText() == "All Processes";
 }
 
 qint64 MainWindow::processMemoryRssKb() {
@@ -869,9 +1181,6 @@ void MainWindow::renderFromSnapshot(const QJsonObject& snapshot) {
         return t;
     }();
 
-    if (snapshot.contains("processes_all")) {
-        cachedProcessesAll_ = snapshot.value("processes_all").toArray();
-    }
     if (snapshot.contains("processes_visible")) {
         cachedProcessesVisible_ = snapshot.value("processes_visible").toArray();
     }
@@ -951,143 +1260,15 @@ void MainWindow::renderFromSnapshot(const QJsonObject& snapshot) {
     }
     const int activeTab = tabs_->currentIndex();
     if (activeTab == 0) {
-        refreshIntervalMs_ = qMax(refreshIntervalMs_, 2200);
+        const bool allProcessesScope =
+            (processScopeCombo_ != nullptr && processScopeCombo_->currentText() == "All Processes");
+        refreshIntervalMs_ = qMax(refreshIntervalMs_, allProcessesScope ? 5000 : 2200);
     }
-    if (diagnosticsText_ != nullptr && activeTab == 6) {
-        const QJsonObject rate = cachedAdvanced_.value("topic_rate_analyzer").toObject();
-        const QJsonObject qos = cachedAdvanced_.value("qos_mismatch_detector").toObject();
-        const QJsonObject lifecycle = cachedAdvanced_.value("lifecycle_timeline").toObject();
-        const QJsonObject leaks = cachedAdvanced_.value("memory_leak_detection").toObject();
-        const QJsonObject net = cachedAdvanced_.value("network_saturation_monitor").toObject();
-        const QJsonObject launch = cachedAdvanced_.value("deterministic_launch_validation").toObject();
-        const QJsonObject impact = cachedAdvanced_.value("dependency_impact_map").toObject();
-        QStringList lines;
-        lines << "Diagnostics Overview";
-        lines << "";
-        lines << QString("Runtime Stability Score: %1")
-                     .arg(cachedAdvanced_.value("runtime_stability_score").toInt(0));
-        lines << QString("Topic Rate Issues: %1").arg(rate.value("issue_count").toInt(0));
-        lines << QString("QoS Mismatches: %1").arg(qos.value("mismatch_count").toInt(0));
-        lines << QString("Lifecycle Stuck Nodes: %1")
-                     .arg(lifecycle.value("stuck_nodes").toArray().size());
-        lines << QString("Memory Leak Candidates: %1").arg(leaks.value("candidate_count").toInt(0));
-        lines << QString("Congested Interfaces: %1")
-                     .arg(net.value("congested_interfaces").toArray().size());
-        lines << QString("Launch Valid: %1")
-                     .arg(launch.value("valid").toBool(true) ? "YES" : "NO");
-        lines << "";
-        lines << "Top Dependency Impact Nodes:";
-        const QJsonArray top = impact.value("top_impact_nodes").toArray();
-        if (top.isEmpty()) {
-            lines << " - none";
-        } else {
-            const int limit = qMin(6, top.size());
-            for (int i = 0; i < limit; ++i) {
-                const QJsonObject row = top.at(i).toObject();
-                lines << QString(" - %1 (downstream %2)")
-                             .arg(row.value("node").toString())
-                             .arg(row.value("downstream_count").toInt());
-            }
-        }
-        diagnosticsText_->setPlainText(lines.join('\n'));
-    }
-    if (performanceText_ != nullptr && activeTab == 7) {
-        const QJsonObject topicRates = cachedAdvanced_.value("topic_rate_analyzer").toObject();
-        const QJsonObject leaks = cachedAdvanced_.value("memory_leak_detection").toObject();
-        const QJsonObject network = cachedAdvanced_.value("network_saturation_monitor").toObject();
-        const QJsonObject correlation = cachedAdvanced_.value("cross_correlation_timeline").toObject();
-        QStringList lines;
-        lines << "Performance Overview";
-        lines << "";
-        lines << QString("Runtime Stability Score: %1")
-                     .arg(cachedAdvanced_.value("runtime_stability_score").toInt(0));
-        lines << QString("Topic Rate Alerts: %1")
-                     .arg(topicRates.value("issue_count").toInt(0));
-        lines << QString("Memory Leak Candidates: %1")
-                     .arg(leaks.value("candidate_count").toInt(0));
-        lines << QString("High Traffic Topics: %1")
-                     .arg(network.value("high_traffic_topic_count").toInt(0));
-        lines << QString("Correlated Events: %1")
-                     .arg(correlation.value("correlated_events").toArray().size());
-        lines << "";
-        lines << "Tip: switch to Diagnostics tab for deep details.";
-        performanceText_->setPlainText(lines.join('\n'));
-    }
-    if (safetyText_ != nullptr && activeTab == 8) {
-        const QJsonObject soft = cachedAdvanced_.value("soft_safety_boundary").toObject();
-        const QJsonObject tfDrift = cachedAdvanced_.value("tf_drift_monitor").toObject();
-        QStringList lines;
-        lines << "Safety Overview";
-        lines << "";
-        lines << QString("Watchdog: %1")
-                     .arg(cachedWatchdog_.value("enabled").toBool(false) ? "ON" : "OFF");
-        lines << QString("Health State: %1")
-                     .arg(cachedHealth_.value("status").toString("unknown").toUpper());
-        lines << QString("Zombie Nodes: %1")
-                     .arg(cachedHealth_.value("zombie_nodes").toArray().size());
-        lines << QString("Domain Conflicts: %1")
-                     .arg(cachedHealth_.value("domain_conflicts").toArray().size());
-        lines << QString("Soft Boundary Warnings: %1")
-                     .arg(soft.value("warning_count").toInt(0));
-        lines << QString("TF Duplicate Children: %1")
-                     .arg(tfDrift.value("duplicate_count").toInt(0));
-        safetyText_->setPlainText(lines.join('\n'));
-    }
-    if (workspaceText_ != nullptr && activeTab == 9) {
-        const QJsonObject ws = cachedAdvanced_.value("workspace_tools").toObject();
-        const QJsonArray chain = ws.value("overlay_chain").toArray();
-        const QJsonArray dup = ws.value("duplicate_packages").toArray();
-        const QJsonArray distros = ws.value("detected_distributions").toArray();
-        QStringList lines;
-        lines << "Workspace Overview";
-        lines << "";
-        lines << QString("Overlay Count: %1").arg(chain.size());
-        lines << QString("Duplicate Packages: %1").arg(dup.size());
-        lines << QString("Mixed ROS Distributions: %1")
-                     .arg(ws.value("mixed_ros_distributions").toBool(false) ? "YES" : "NO");
-        lines << QString("ABI Mismatch Suspected: %1")
-                     .arg(ws.value("abi_mismatch_suspected").toBool(false) ? "YES" : "NO");
-        lines << "";
-        lines << "Detected Distributions:";
-        if (distros.isEmpty()) {
-            lines << " - none";
-        } else {
-            for (const QJsonValue& v : distros) {
-                lines << QString(" - %1").arg(v.toString());
-            }
-        }
-        lines << "";
-        lines << "Overlay Chain:";
-        if (chain.isEmpty()) {
-            lines << " - none";
-        } else {
-            for (const QJsonValue& v : chain) {
-                lines << QString(" - %1").arg(v.toString());
-            }
-        }
-        workspaceText_->setPlainText(lines.join('\n'));
-    }
-    if (fleetText_ != nullptr && activeTab == 10) {
-        const QJsonArray robots = cachedFleet_.value("robots").toArray();
-        QStringList lines;
-        lines << "Fleet Overview";
-        lines << "";
-        lines << QString("Healthy Robots: %1 / %2")
-                     .arg(cachedFleet_.value("healthy_count").toInt(0))
-                     .arg(cachedFleet_.value("total_count").toInt(0));
-        lines << QString("Offline Action Queue: %1")
-                     .arg(cachedFleet_.value("offline_queue_size").toInt(0));
-        lines << "";
-        lines << "Robots:";
-        for (const QJsonValue& value : robots) {
-            const QJsonObject robot = value.toObject();
-            const QString name = robot.value("name").toString(robot.value("host").toString("unknown"));
-            const bool reachable = robot.value("reachable").toBool(false);
-            lines << QString(" - %1: %2")
-                         .arg(name, reachable ? "reachable" : "unreachable");
-        }
-        fleetText_->setPlainText(lines.join('\n'));
-    }
+    renderDiagnosticsPanel();
+    renderPerformancePanel();
+    renderSafetyPanel();
+    renderWorkspacePanel();
+    renderFleetPanel();
     renderHealthSummary();
     updateProcessPaginationLabel();
     Telemetry::instance().recordDurationMs("ui.render.snapshot_ms", renderTimer.elapsed());
@@ -1174,24 +1355,28 @@ void MainWindow::renderProcesses() {
 
         const QString nodeName = proc.value("node_name").toString();
         const bool isRos = proc.value("is_ros").toBool(false);
-        QColor background = QColor("#f3f7f3");
-        QColor foreground = QColor("#111111");
+        QColor background = QColor("#243628");
+        QColor foreground = QColor("#d9f4df");
         QString reason = "Healthy";
         if (!isRos) {
-            background = QColor("#f7f7f7");
-            foreground = QColor("#9a9a9a");
+            background = QColor("#252b32");
+            foreground = QColor("#90a0ae");
             reason = "Non-ROS process";
         } else if (zombieNodes.contains(nodeName)) {
-            background = QColor("#ffe9e9");  // red
+            background = QColor("#432125");  // red
+            foreground = QColor("#ffd6da");
             reason = "Zombie node: PID missing or invalid";
         } else if (qosMismatchNodes.contains(nodeName)) {
-            background = QColor("#fff7d6");  // yellow
+            background = QColor("#3f3823");  // yellow
+            foreground = QColor("#ffefc7");
             reason = "QoS mismatch detected for one or more node topics";
         } else if (duplicateNodes.contains(nodeName)) {
-            background = QColor("#f3ecff");  // purple
+            background = QColor("#3a2749");  // purple
+            foreground = QColor("#ecd9ff");
             reason = "Duplicate node name detected";
         } else if (inactiveLifecycleNodes.contains(nodeName)) {
-            background = QColor("#e8f1ff");  // blue
+            background = QColor("#1f2e43");  // blue
+            foreground = QColor("#d8e7ff");
             reason = "Lifecycle node not in active state";
         }
         for (int c = 0; c < processTable_->columnCount(); ++c) {
@@ -1282,11 +1467,12 @@ void MainWindow::renderDomains() {
         const bool conflict = conflictDomains.contains(domain);
         auto* conflictItem = new QTableWidgetItem(conflict ? "YES" : "NO");
         if (conflict) {
-            conflictItem->setForeground(QBrush(QColor("#b22222")));
+            conflictItem->setForeground(QBrush(QColor("#ffd6da")));
             for (int c = 0; c < domainTable_->columnCount(); ++c) {
                 QTableWidgetItem* item = domainTable_->item(row, c);
                 if (item != nullptr) {
-                    item->setBackground(QBrush(QColor("#fff2f0")));
+                    item->setBackground(QBrush(QColor("#432125")));
+                    item->setForeground(QBrush(QColor("#ffd6da")));
                 }
             }
         }
@@ -1513,27 +1699,418 @@ void MainWindow::renderSystemHardware() {
             QString("GPU: %1%").arg(gpu0.value("utilization_percent").toDouble(), 0, 'f', 1));
     }
 
+    // Live sparkline graphs for key continuously-monitored values.
+    const double cpuPct = cpu.value("usage_percent").toDouble();
+    const double memPct = mem.value("used_percent").toDouble();
+    const double diskPct = disk.value("used_percent").toDouble();
+    appendHistory(&cpuHistory_, cpuPct);
+    appendHistory(&memHistory_, memPct);
+    appendHistory(&diskHistory_, diskPct);
+
+    qint64 totalNetBytes = 0;
+    for (const QJsonValue& value : cachedSystem_.value("network_interfaces").toArray()) {
+        const QJsonObject iface = value.toObject();
+        totalNetBytes += static_cast<qint64>(iface.value("rx_bytes").toDouble(0));
+        totalNetBytes += static_cast<qint64>(iface.value("tx_bytes").toDouble(0));
+    }
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    double netMbps = 0.0;
+    if (previousNetSampleMs_ > 0 && nowMs > previousNetSampleMs_ && totalNetBytes >= previousNetBytes_) {
+        const double dt = static_cast<double>(nowMs - previousNetSampleMs_) / 1000.0;
+        if (dt > 0.0) {
+            const double deltaBytes = static_cast<double>(totalNetBytes - previousNetBytes_);
+            netMbps = (deltaBytes * 8.0) / 1000000.0 / dt;
+        }
+    }
+    previousNetBytes_ = totalNetBytes;
+    previousNetSampleMs_ = nowMs;
+    appendHistory(&netHistory_, netMbps, 40);
+
+    if (cpuGraphLabel_ != nullptr) {
+        cpuGraphLabel_->setText(
+            QString("CPU  %1%  [%2]").arg(cpuPct, 0, 'f', 1).arg(sparkline(cpuHistory_)));
+    }
+    if (memGraphLabel_ != nullptr) {
+        memGraphLabel_->setText(
+            QString("MEM  %1%  [%2]").arg(memPct, 0, 'f', 1).arg(sparkline(memHistory_)));
+    }
+    if (diskGraphLabel_ != nullptr) {
+        diskGraphLabel_->setText(
+            QString("DISK %1%  [%2]").arg(diskPct, 0, 'f', 1).arg(sparkline(diskHistory_)));
+    }
+    if (netGraphLabel_ != nullptr) {
+        netGraphLabel_->setText(
+            QString("NET  %1 Mbps [%2]").arg(netMbps, 0, 'f', 1).arg(sparkline(netHistory_, 20.0)));
+    }
+
+    if (htopPanel_ != nullptr) {
+        const QString loadAvg = readLocalTextFile("/proc/loadavg").trimmed();
+        int running = 0;
+        int sleeping = 0;
+        int other = 0;
+        for (const QJsonValue& value : cachedProcessesVisible_) {
+            const QString state = value.toObject().value("state").toString();
+            if (state == "R") {
+                running++;
+            } else if (state == "S") {
+                sleeping++;
+            } else {
+                other++;
+            }
+        }
+        QStringList lines;
+        lines << "System Activity";
+        lines << QString("Tasks: %1 total | %2 running | %3 sleeping | %4 other")
+                     .arg(processTotalFiltered_)
+                     .arg(running)
+                     .arg(sleeping)
+                     .arg(other);
+        lines << QString("CPU: %1% | Mem: %2% | Disk: %3%")
+                     .arg(cpuPct, 0, 'f', 1)
+                     .arg(memPct, 0, 'f', 1)
+                     .arg(diskPct, 0, 'f', 1);
+        lines << QString("Load Avg: %1").arg(loadAvg.isEmpty() ? "-" : loadAvg);
+        lines << "Top visible by CPU:";
+        const int topN = qMin(6, cachedProcessesVisible_.size());
+        for (int i = 0; i < topN; ++i) {
+            const QJsonObject p = cachedProcessesVisible_.at(i).toObject();
+            lines << QString(" %1  %2%  %3 MB  %4")
+                         .arg(p.value("pid").toInt())
+                         .arg(p.value("cpu_percent").toDouble(), 0, 'f', 1)
+                         .arg((p.value("memory_percent").toDouble() / 100.0)
+                                  * (mem.value("total_kb").toDouble() / 1024.0),
+                              0,
+                              'f',
+                              1)
+                         .arg(p.value("name").toString());
+        }
+        htopPanel_->setPlainText(lines.join('\n'));
+    }
+
     usbText_->setPlainText(joinArrayLines(cachedSystem_.value("usb_devices").toArray()));
     serialText_->setPlainText(joinArrayLines(cachedSystem_.value("serial_ports").toArray()));
     canText_->setPlainText(joinArrayLines(cachedSystem_.value("can_interfaces").toArray()));
-    netText_->setPlainText(joinArrayLines(cachedSystem_.value("network_interfaces").toArray()));
+    netText_->setPlainText(formatNetworkInterfaces(cachedSystem_.value("network_interfaces").toArray()));
 }
 
 void MainWindow::renderLogs() {
     logsText_->setPlainText(cachedLogs_);
 }
 
+void MainWindow::renderDiagnosticsPanel() {
+    const QJsonObject rate = cachedAdvanced_.value("topic_rate_analyzer").toObject();
+    const QJsonObject qos = cachedAdvanced_.value("qos_mismatch_detector").toObject();
+    const QJsonObject lifecycle = cachedAdvanced_.value("lifecycle_timeline").toObject();
+    const QJsonObject leaks = cachedAdvanced_.value("memory_leak_detection").toObject();
+    const QJsonObject net = cachedAdvanced_.value("network_saturation_monitor").toObject();
+    const QJsonObject launch = cachedAdvanced_.value("deterministic_launch_validation").toObject();
+    const QJsonObject impact = cachedAdvanced_.value("dependency_impact_map").toObject();
+    const QJsonArray impactNodes = impact.value("top_impact_nodes").toArray();
+
+    QString topImpact = "none";
+    if (!impactNodes.isEmpty()) {
+        const QJsonObject row = impactNodes.first().toObject();
+        topImpact = QString("%1 (downstream %2)")
+                        .arg(row.value("node").toString("-"))
+                        .arg(row.value("downstream_count").toInt(0));
+    }
+
+    QVector<QPair<QString, QString>> rows{
+        {"Runtime Stability Score", QString::number(cachedAdvanced_.value("runtime_stability_score").toInt(0))},
+        {"Topic Rate Issues", QString::number(rate.value("issue_count").toInt(rate.value("underperforming_publishers").toArray().size()))},
+        {"QoS Mismatches", QString::number(qos.value("mismatch_count").toInt(0))},
+        {"Lifecycle Stuck Nodes", QString::number(lifecycle.value("stuck_transitional_nodes").toArray().size())},
+        {"Memory Leak Candidates", QString::number(leaks.value("candidate_count").toInt(0))},
+        {"Congested Interfaces", QString::number(net.value("congested_interfaces").toArray().size())},
+        {"Deterministic Launch", launch.value("valid").toBool(true) ? "Pass" : "Fail"},
+        {"Top Dependency Impact", topImpact},
+    };
+
+    QSet<int> warningRows;
+    QSet<int> criticalRows;
+    if (rows.at(1).second.toInt() > 0) {
+        warningRows.insert(1);
+    }
+    if (rows.at(2).second.toInt() > 0) {
+        warningRows.insert(2);
+    }
+    if (rows.at(3).second.toInt() > 0) {
+        warningRows.insert(3);
+    }
+    if (rows.at(4).second.toInt() > 0) {
+        warningRows.insert(4);
+    }
+    if (rows.at(5).second.toInt() > 0) {
+        warningRows.insert(5);
+    }
+    if (!launch.value("valid").toBool(true)) {
+        criticalRows.insert(6);
+    }
+
+    populateKeyValueTable(diagnosticsTable_, rows, warningRows, criticalRows);
+    if (diagnosticsSummaryLabel_ != nullptr) {
+        diagnosticsSummaryLabel_->setText(
+            QString("Diagnostics overview | score %1 | QoS mismatches %2 | leaks %3")
+                .arg(rows.at(0).second)
+                .arg(rows.at(2).second)
+                .arg(rows.at(4).second));
+    }
+}
+
+void MainWindow::renderPerformancePanel() {
+    const QJsonObject topicRates = cachedAdvanced_.value("topic_rate_analyzer").toObject();
+    const QJsonObject leaks = cachedAdvanced_.value("memory_leak_detection").toObject();
+    const QJsonObject network = cachedAdvanced_.value("network_saturation_monitor").toObject();
+    const QJsonObject correlation = cachedAdvanced_.value("cross_correlation_timeline").toObject();
+    const QJsonObject cpu = cachedSystem_.value("cpu").toObject();
+    const QJsonObject mem = cachedSystem_.value("memory").toObject();
+    const QJsonObject disk = cachedSystem_.value("disk").toObject();
+
+    const QJsonArray highTraffic = network.value("high_traffic_publishers").toArray();
+    QString topTopic = "none";
+    if (!highTraffic.isEmpty()) {
+        const QJsonObject top = highTraffic.first().toObject();
+        topTopic = QString("%1 (%2 Mbps)")
+                       .arg(top.value("topic").toString("-"))
+                       .arg(top.value("throughput_mbps").toDouble(), 0, 'f', 1);
+    }
+
+    QVector<QPair<QString, QString>> rows{
+        {"CPU Usage", QString("%1%").arg(cpu.value("usage_percent").toDouble(), 0, 'f', 1)},
+        {"Memory Usage", QString("%1%").arg(mem.value("used_percent").toDouble(), 0, 'f', 1)},
+        {"Disk Usage", QString("%1%").arg(disk.value("used_percent").toDouble(), 0, 'f', 1)},
+        {"Visible Processes", QString::number(cachedProcessesVisible_.size())},
+        {"Filtered Processes", QString::number(processTotalFiltered_)},
+        {"Topic Samples", QString::number(topicRates.value("topic_metrics").toArray().size())},
+        {"Correlated Events", QString::number(correlation.value("correlated_events").toArray().size())},
+        {"Leak Candidates", QString::number(leaks.value("candidate_count").toInt(0))},
+        {"High Traffic Topics", QString::number(highTraffic.size())},
+        {"Top High Traffic Topic", topTopic},
+    };
+
+    QSet<int> warningRows;
+    if (cpu.value("usage_percent").toDouble() > 90.0) {
+        warningRows.insert(0);
+    }
+    if (mem.value("used_percent").toDouble() > 90.0) {
+        warningRows.insert(1);
+    }
+    if (disk.value("used_percent").toDouble() > 92.0) {
+        warningRows.insert(2);
+    }
+    if (rows.at(7).second.toInt() > 0) {
+        warningRows.insert(7);
+    }
+    if (rows.at(8).second.toInt() > 0) {
+        warningRows.insert(8);
+    }
+
+    populateKeyValueTable(performanceTable_, rows, warningRows, {});
+    if (performanceSummaryLabel_ != nullptr) {
+        performanceSummaryLabel_->setText(
+            QString("Performance metrics | CPU %1 | MEM %2 | active rows %3")
+                .arg(rows.at(0).second)
+                .arg(rows.at(1).second)
+                .arg(rows.at(3).second));
+    }
+}
+
+void MainWindow::renderSafetyPanel() {
+    const QJsonObject soft = cachedAdvanced_.value("soft_safety_boundary").toObject();
+    const QJsonObject tfDrift = cachedAdvanced_.value("tf_drift_monitor").toObject();
+    const QString healthState = cachedHealth_.value("status").toString("unknown").toUpper();
+    const int zombieCount = cachedHealth_.value("zombie_nodes").toArray().size();
+    const int conflictCount = cachedHealth_.value("domain_conflicts").toArray().size();
+    const int softWarnings = soft.value("warning_count").toInt(0);
+    const int tfDuplicates = tfDrift.value("duplicate_count").toInt(0);
+
+    QVector<QPair<QString, QString>> rows{
+        {"Watchdog Enabled", boolText(cachedWatchdog_.value("enabled").toBool(false))},
+        {"Health State", healthState},
+        {"Zombie Nodes", QString::number(zombieCount)},
+        {"Domain Conflicts", QString::number(conflictCount)},
+        {"Soft Boundary Warnings", QString::number(softWarnings)},
+        {"TF Duplicate Children", QString::number(tfDuplicates)},
+        {"Emergency Controls", "Ready"},
+    };
+
+    QSet<int> warningRows;
+    QSet<int> criticalRows;
+    if (healthState == "CRITICAL") {
+        criticalRows.insert(1);
+    } else if (healthState == "WARNING" || healthState == "DEGRADED") {
+        warningRows.insert(1);
+    }
+    if (zombieCount > 0) {
+        criticalRows.insert(2);
+    }
+    if (conflictCount > 0) {
+        warningRows.insert(3);
+    }
+    if (softWarnings > 0) {
+        warningRows.insert(4);
+    }
+    if (tfDuplicates > 0) {
+        warningRows.insert(5);
+    }
+
+    populateKeyValueTable(safetyTable_, rows, warningRows, criticalRows);
+    if (safetySummaryLabel_ != nullptr) {
+        safetySummaryLabel_->setText(
+            QString("Safety status | %1 | zombies %2 | warnings %3")
+                .arg(healthState)
+                .arg(zombieCount)
+                .arg(softWarnings + tfDuplicates));
+    }
+}
+
+void MainWindow::renderWorkspacePanel() {
+    const QJsonObject ws = cachedAdvanced_.value("workspace_tools").toObject();
+    const QJsonArray chain = ws.value("overlay_chain").toArray();
+    const QJsonArray dup = ws.value("duplicate_packages").toArray();
+    const QJsonArray distros = ws.value("detected_distributions").toArray();
+    const QJsonArray paramChanges =
+        cachedAdvanced_.value("parameter_drift").toObject().value("changed_nodes").toArray();
+
+    QStringList distroList;
+    for (const QJsonValue& value : distros) {
+        distroList.append(value.toString());
+    }
+    QStringList chainList;
+    for (const QJsonValue& value : chain) {
+        chainList.append(value.toString());
+    }
+    const QString distroText = distroList.isEmpty() ? "none" : distroList.join(", ");
+    const QString chainPreview = chainList.isEmpty() ? "none" : chainList.mid(0, 4).join(" -> ");
+    const QString chainSuffix = chainList.size() > 4 ? " -> ..." : "";
+
+    QString duplicatePreview = "none";
+    if (!dup.isEmpty()) {
+        QStringList entries;
+        const int limit = qMin(3, dup.size());
+        for (int i = 0; i < limit; ++i) {
+            const QJsonObject row = dup.at(i).toObject();
+            entries.append(
+                QString("%1 (%2)")
+                    .arg(row.value("package").toString("-"))
+                    .arg(row.value("workspaces").toArray().size()));
+        }
+        duplicatePreview = entries.join(", ");
+    }
+
+    QVector<QPair<QString, QString>> rows{
+        {"Overlay Count", QString::number(chain.size())},
+        {"Duplicate Packages", QString::number(dup.size())},
+        {"Mixed ROS Distributions", boolText(ws.value("mixed_ros_distributions").toBool(false))},
+        {"ABI Mismatch Suspected", boolText(ws.value("abi_mismatch_suspected").toBool(false))},
+        {"Detected Distributions", distroText},
+        {"Overlay Chain", chainPreview + chainSuffix},
+        {"Duplicate Package Preview", duplicatePreview},
+        {"Parameter Drift Nodes", QString::number(paramChanges.size())},
+    };
+
+    QSet<int> warningRows;
+    if (rows.at(1).second.toInt() > 0) {
+        warningRows.insert(1);
+    }
+    if (rows.at(2).second == "Yes") {
+        warningRows.insert(2);
+    }
+    if (rows.at(3).second == "Yes") {
+        warningRows.insert(3);
+    }
+    if (rows.at(7).second.toInt() > 0) {
+        warningRows.insert(7);
+    }
+
+    populateKeyValueTable(workspaceTable_, rows, warningRows, {});
+    if (workspaceSummaryLabel_ != nullptr) {
+        workspaceSummaryLabel_->setText(
+            QString("Workspace health | overlays %1 | duplicates %2 | distros %3")
+                .arg(rows.at(0).second)
+                .arg(rows.at(1).second)
+                .arg(distros.size()));
+    }
+}
+
+void MainWindow::renderFleetPanel() {
+    if (fleetTable_ == nullptr) {
+        return;
+    }
+
+    const QJsonArray robots = cachedFleet_.value("robots").toArray();
+    if (robots.isEmpty()) {
+        fleetTable_->clearContents();
+        fleetTable_->setRowCount(1);
+        fleetTable_->setItem(0, 0, new QTableWidgetItem("No fleet targets loaded"));
+        for (int col = 1; col < fleetTable_->columnCount(); ++col) {
+            fleetTable_->setItem(0, col, new QTableWidgetItem("-"));
+        }
+        if (fleetSummaryLabel_ != nullptr) {
+            fleetSummaryLabel_->setText("Fleet status | load targets to monitor remote hosts");
+        }
+        return;
+    }
+
+    fleetTable_->clearContents();
+    fleetTable_->setRowCount(robots.size());
+    int row = 0;
+    for (const QJsonValue& value : robots) {
+        const QJsonObject robot = value.toObject();
+        const QString name = robot.value("name").toString(robot.value("host").toString("unknown"));
+        const bool reachable = robot.value("reachable").toBool(false);
+        const QString reachability = reachable ? "Reachable" : "Unreachable";
+        const QString nodeCount = robot.contains("node_count") ? QString::number(robot.value("node_count").toInt()) : "-";
+        const QString load = robot.contains("load_1m")
+            ? QString::number(robot.value("load_1m").toDouble(), 'f', 2)
+            : "-";
+        const QString mem = robot.contains("mem_available_kb")
+            ? QString::number(static_cast<qint64>(robot.value("mem_available_kb").toDouble()))
+            : "-";
+
+        fleetTable_->setItem(row, 0, new QTableWidgetItem(name));
+        fleetTable_->setItem(row, 1, new QTableWidgetItem(reachability));
+        fleetTable_->setItem(row, 2, new QTableWidgetItem(nodeCount));
+        fleetTable_->setItem(row, 3, new QTableWidgetItem(load));
+        fleetTable_->setItem(row, 4, new QTableWidgetItem(mem));
+
+        const QColor bg = reachable ? QColor("#23382a") : QColor("#432125");
+        const QColor fg = reachable ? QColor("#d7f0de") : QColor("#ffd6da");
+        const QString error = robot.value("error").toString();
+        for (int c = 0; c < fleetTable_->columnCount(); ++c) {
+            QTableWidgetItem* item = fleetTable_->item(row, c);
+            if (item == nullptr) {
+                continue;
+            }
+            item->setBackground(QBrush(bg));
+            item->setForeground(QBrush(fg));
+            if (!error.isEmpty()) {
+                item->setToolTip(error);
+            }
+        }
+        row++;
+    }
+
+    if (fleetSummaryLabel_ != nullptr) {
+        fleetSummaryLabel_->setText(
+            QString("Fleet status | healthy %1/%2 | offline queue %3")
+                .arg(cachedFleet_.value("healthy_count").toInt(0))
+                .arg(cachedFleet_.value("total_count").toInt(0))
+                .arg(cachedFleet_.value("offline_queue_size").toInt(0)));
+    }
+}
+
 void MainWindow::renderHealthSummary() {
     const QString status = cachedHealth_.value("status").toString("unknown").toLower();
     if (status == "critical") {
         healthLabel_->setStyleSheet(
-            "font-size:18px;font-weight:800;padding:8px 12px;border-radius:10px;background:#fde8e8;color:#b22222;");
+            "font-size:18px;font-weight:800;padding:8px 12px;border-radius:10px;background:#4a252a;color:#ffd6da;");
     } else if (status == "warning") {
         healthLabel_->setStyleSheet(
-            "font-size:18px;font-weight:800;padding:8px 12px;border-radius:10px;background:#fff7da;color:#b8860b;");
+            "font-size:18px;font-weight:800;padding:8px 12px;border-radius:10px;background:#4a3e20;color:#ffefc0;");
     } else {
         healthLabel_->setStyleSheet(
-            "font-size:18px;font-weight:800;padding:8px 12px;border-radius:10px;background:#e8f7ec;color:#1e8e3e;");
+            "font-size:18px;font-weight:800;padding:8px 12px;border-radius:10px;background:#23412a;color:#d7f3dd;");
     }
 
     QString badge = "HEALTHY";
