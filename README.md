@@ -3,27 +3,18 @@
 </p>
 
 <p align="center">
-  <a href="#"><img alt="AssetLib" src="https://img.shields.io/badge/AssetLib-Available-478cbf?style=for-the-badge&logo=godotengine&logoColor=white"></a>
-  <a href="#"><img alt="SwiftPM" src="https://img.shields.io/badge/SwiftPM-Compatible-f05138?style=for-the-badge&logo=swift&logoColor=white"></a>
-  <a href="#"><img alt="Twitter" src="https://img.shields.io/badge/Twitter-Follow-1d9bf0?style=for-the-badge&logo=x&logoColor=white"></a>
-  <a href="#"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-RosScope-181717?style=for-the-badge&logo=github"></a>
-  <a href="#"><img alt="GitHub Issues" src="https://img.shields.io/badge/GitHub-Issues-2f81f7?style=for-the-badge&logo=github"></a>
+  <a href="https://github.com/00PrabalK00/RosScope"><img alt="GitHub Repo" src="https://img.shields.io/badge/GitHub-00PrabalK00%2FRosScope-181717?style=for-the-badge&logo=github"></a>
+  <a href="https://github.com/00PrabalK00/RosScope/issues"><img alt="GitHub Issues" src="https://img.shields.io/github/issues/00PrabalK00/RosScope?style=for-the-badge&logo=github"></a>
+  <a href="https://github.com/00PrabalK00/RosScope/stargazers"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/00PrabalK00/RosScope?style=for-the-badge&logo=github"></a>
+  <a href="https://github.com/00PrabalK00/RosScope/commits/main"><img alt="Last Commit" src="https://img.shields.io/github/last-commit/00PrabalK00/RosScope?style=for-the-badge&logo=github"></a>
 </p>
 
 <p align="center">
-  <a href="#"><img alt="GitHub Actions" src="https://img.shields.io/badge/Actions-Passing-2ea44f?style=for-the-badge&logo=githubactions"></a>
-  <a href="#"><img alt="CircleCI" src="https://img.shields.io/badge/CircleCI-Passing-343434?style=for-the-badge&logo=circleci"></a>
-  <a href="#"><img alt="Bitrise" src="https://img.shields.io/badge/Bitrise-Passing-683d87?style=for-the-badge&logo=bitrise"></a>
-  <a href="#"><img alt="Codecov" src="https://img.shields.io/badge/Codecov-Tracked-f01f7a?style=for-the-badge&logo=codecov"></a>
-  <a href="#"><img alt="CodeFactor" src="https://img.shields.io/badge/CodeFactor-Grade-A?style=for-the-badge&logo=codefactor"></a>
-</p>
-
-<p align="center">
-  <a href="#"><img alt="codebeat" src="https://img.shields.io/badge/codebeat-Badge-blue?style=for-the-badge"></a>
-  <a href="#"><img alt="Code Climate Maintainability" src="https://img.shields.io/badge/Code_Climate-Maintainability-A3?style=for-the-badge&logo=codeclimate"></a>
-  <a href="#"><img alt="Code Climate Technical Debt" src="https://img.shields.io/badge/Code_Climate-Technical_Debt-Low?style=for-the-badge&logo=codeclimate"></a>
-  <a href="#"><img alt="Code Climate Issues" src="https://img.shields.io/badge/Code_Climate-Issues-Low?style=for-the-badge&logo=codeclimate"></a>
-  <a href="#"><img alt="Reviewed by Hound" src="https://img.shields.io/badge/Reviewed_by-Hound-ff8c00?style=for-the-badge"></a>
+  <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C?style=for-the-badge&logo=cplusplus&logoColor=white">
+  <img alt="Qt6" src="https://img.shields.io/badge/Qt-6-41CD52?style=for-the-badge&logo=qt&logoColor=white">
+  <img alt="ROS 2" src="https://img.shields.io/badge/ROS-2-22314E?style=for-the-badge&logo=ros&logoColor=white">
+  <img alt="Ubuntu 22.04+" src="https://img.shields.io/badge/Ubuntu-22.04%2B-E95420?style=for-the-badge&logo=ubuntu&logoColor=white">
+  <img alt="CMake 3.16+" src="https://img.shields.io/badge/CMake-3.16%2B-064F8C?style=for-the-badge&logo=cmake&logoColor=white">
 </p>
 
 # RosScope
